@@ -50,8 +50,23 @@ def sniff_kind(data: bytes) -> Kind:
     # always does.
     try:
         head.decode("utf-8")
-    except UnicodeDecodeError:
-        return "binary"
+    except UnicodeDecodeError as exc:
+        # `head` is a raw byte slice taken before decoding, so a multi-byte
+        # UTF-8 character can straddle the 256-byte cut. That produces a
+        # UnicodeDecodeError on the truncated trailing bytes even when the
+        # full content (and the untruncated prefix of this very slice) is
+        # perfectly valid UTF-8. A genuine truncated sequence can only start
+        # within the last 3 bytes of head (the longest continuation run),
+        # so retry decoding just the prefix before the cut; if that prefix
+        # decodes cleanly, the gate passes. An error further back in the
+        # slice means the content is genuinely invalid UTF-8.
+        if exc.start >= len(head) - 3:
+            try:
+                head[: exc.start].decode("utf-8")
+            except UnicodeDecodeError:
+                return "binary"
+        else:
+            return "binary"
 
     if stripped[:5] == b"<?xml" or (stripped[:1] == b"<" and b">" in stripped[:256]):
         return "xml"

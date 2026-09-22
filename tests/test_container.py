@@ -129,3 +129,28 @@ def test_sniff_kind_invalid_utf8_still_binary():
     # byte is not valid UTF-8.
     data = bytes([0xFF, 0xFE, 0x80, 0x81, 0x82, 0x83] * 40)
     assert sniff_kind(data) == "binary"
+
+
+def test_sniff_kind_long_cjk_text_over_256_bytes():
+    """The UTF-8 validity gate slices the first 256 bytes of the (stripped)
+    content BEFORE decoding. If a multi-byte UTF-8 character straddles that
+    256-byte boundary, decoding the raw slice raises UnicodeDecodeError on
+    the truncated trailing bytes even though the full content is perfectly
+    valid UTF-8. Realistic CJK content well over 256 bytes must still be
+    classified as text, not binary, regardless of where the cut lands.
+    """
+    sentence = "こんにちは世界、今日はとても良い天気ですね。お元気ですか。"
+    text = (sentence * 5).encode("utf-8")
+    assert len(text) > 300
+    assert sniff_kind(text) == "text"
+
+
+def test_sniff_kind_long_accented_text_over_256_bytes():
+    """Same boundary-truncation bug, but for accented Latin text where the
+    2-byte UTF-8 sequences are less dense than CJK, making it more likely a
+    cut lands mid-character somewhere within a long run of content.
+    """
+    sentence = "Café con José y Frédéric, très bien! Ça va très bien, mêmes amis. "
+    text = (sentence * 6).encode("utf-8")
+    assert len(text) > 300
+    assert sniff_kind(text) == "text"
