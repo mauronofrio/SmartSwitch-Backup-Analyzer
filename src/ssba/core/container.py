@@ -36,7 +36,8 @@ def sniff_kind(data: bytes) -> Kind:
     ):
         return "media"
 
-    # Strip leading/trailing whitespace and null bytes (from decryption padding)
+    # Strip trailing null bytes (from AES-CBC zero-byte padding) and any
+    # leading/trailing whitespace, to ensure printable-ratio check is accurate
     stripped = data.strip(b"\x00 \t\n\r\x0b\x0c")
     head = stripped[:256]
     if not head:

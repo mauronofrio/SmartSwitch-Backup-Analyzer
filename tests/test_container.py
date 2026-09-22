@@ -71,6 +71,22 @@ def test_sniff_kind_binary_starts_with_json_brace():
     )
 
 
+def test_sniff_kind_xml_with_trailing_null_padding():
+    """Test that XML with trailing null-byte padding is correctly classified as XML.
+
+    decrypt_iv_prefixed doesn't strip AES padding, and this project's padding scheme
+    is zero-byte (see tests/crypto_helpers.py), so short genuine XML content often
+    arrives with trailing \x00 bytes. This test ensures the printable-ratio check
+    is computed on stripped data so legitimate content isn't rejected by padding.
+    """
+    assert sniff_kind(b"<a/>" + b"\x00" * 12) == "xml"
+
+
+def test_sniff_kind_json_with_trailing_null_padding():
+    """Test that JSON with trailing null-byte padding is correctly classified as JSON."""
+    assert sniff_kind(b'{"a":1}' + b"\x00" * 9) == "json"
+
+
 def test_decrypt_file_recovers_xml():
     plaintext = b"<?xml version='1.0'?><CallLogs></CallLogs>"
     raw = encrypt_iv_prefixed(plaintext, KEY)
