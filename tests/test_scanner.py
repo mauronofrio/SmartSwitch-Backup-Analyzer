@@ -86,6 +86,67 @@ def test_scan_category_wrapped_zip(tmp_path):
     )
 
 
+def test_scan_category_docx_preserved_as_opaque_file(tmp_path):
+    """Regression test: a real end-user .docx (itself a zip container under
+    the hood) must be recovered as a single, openable file - not exploded
+    into a directory of its internal XML parts, even though sniff_kind
+    correctly reports it as kind="zip".
+    """
+    _write_history_xml(tmp_path)
+
+    docx_bytes = _zip_bytes(
+        {
+            "[Content_Types].xml": b"<?xml version='1.0'?><Types/>",
+            "word/document.xml": b"<?xml version='1.0'?><w:document/>",
+            "docProps/core.xml": b"<?xml version='1.0'?><coreProperties/>",
+        }
+    )
+
+    (tmp_path / "CATEGORY_E").mkdir()
+    (tmp_path / "CATEGORY_E" / "CASTELLANA_GENNAIO_2024649.docx").write_bytes(docx_bytes)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "CATEGORY_E", KEY, out_dir)
+
+    docx_out_path = out_dir / "CATEGORY_E" / "CASTELLANA_GENNAIO_2024649.docx"
+    assert docx_out_path.is_file(), "expected the .docx to be written as a single file"
+    assert docx_out_path.read_bytes() == docx_bytes
+
+    # No exploded directory structure for the .docx's internal parts.
+    assert not (docx_out_path / "word").exists()
+    assert not (out_dir / "CATEGORY_E" / "CASTELLANA_GENNAIO_2024649.docx" / "[Content_Types].xml").exists()
+
+    assert len(result.files) == 1
+    file_result = result.files[0]
+    assert file_result.relative_path == "CASTELLANA_GENNAIO_2024649.docx"
+    assert file_result.status == "plaintext_passthrough"
+    assert file_result.kind == "zip"
+
+
+def test_scan_category_non_document_zip_still_recursed(tmp_path):
+    """Guard against the opaque-document fix being too broad: a zip-shaped
+    file whose extension is NOT in the document allowlist (e.g. Smart
+    Switch's own wrapper containers, or a plain .zip) must keep the old
+    recurse-and-explode behavior.
+    """
+    _write_history_xml(tmp_path)
+
+    wrapper_zip = _zip_bytes({"readme.txt": b"plain content inside wrapper"})
+
+    (tmp_path / "CATEGORY_F").mkdir()
+    (tmp_path / "CATEGORY_F" / "Contact.zip").write_bytes(wrapper_zip)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "CATEGORY_F", KEY, out_dir)
+
+    wrapper_out_path = out_dir / "CATEGORY_F" / "Contact.zip"
+    assert not wrapper_out_path.is_file(), "non-document zip should not be preserved as a flat file"
+    assert (wrapper_out_path / "readme.txt").read_bytes() == b"plain content inside wrapper"
+
+    counts = result.counts()
+    assert counts["plaintext_passthrough"] == 2  # Contact.zip itself + readme.txt
+
+
 def test_scan_category_undecodable_file(tmp_path):
     _build_fake_backup(tmp_path)
     out_dir = tmp_path / "out"

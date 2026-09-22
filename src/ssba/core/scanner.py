@@ -17,6 +17,24 @@ from ssba.core.session import get_session_dummy
 
 FileStatus = Literal["decrypted", "plaintext_passthrough", "undecoded", "error"]
 
+# Zip-based container formats that must always be preserved as a single,
+# opaque file - never recursed into - even though sniff_kind correctly
+# reports their raw (or decrypted) bytes as kind="zip". These are Office
+# Open XML, legacy macro-enabled variants, OpenDocument formats, and EPUB:
+# real end-user documents a phone backup might contain, where the zip
+# structure is an implementation detail, not something a user wants exposed
+# as a directory of exploded XML parts. Smart Switch's own wrapper
+# containers (e.g. Contact.spbm, sdoc.snmm) are intentionally NOT in this
+# list, since those are disposable wrappers whose useful content is what's
+# inside them.
+OPAQUE_ZIP_DOCUMENT_EXTENSIONS = frozenset({
+    ".docx", ".docm", ".dotx", ".dotm",
+    ".xlsx", ".xlsm", ".xltx", ".xltm",
+    ".pptx", ".pptm", ".potx", ".potm", ".ppsx", ".ppsm",
+    ".odt", ".ods", ".odp", ".odg",
+    ".epub",
+})
+
 
 @dataclass
 class FileResult:
@@ -119,6 +137,21 @@ def _sanitize_entry_name(name: str) -> str | None:
     return "/".join(parts)
 
 
+def _is_opaque_zip_document(name: str) -> bool:
+    """True if `name`'s extension marks it as a zip-based document format
+    that must be preserved as a single file rather than recursed into (see
+    OPAQUE_ZIP_DOCUMENT_EXTENSIONS). Extension matching is case-insensitive
+    and looks only at the final path segment, so it works whether `name` is
+    a plain filename or a zip entry path using "/" or "\\" separators.
+    """
+    normalized = name.replace("\\", "/")
+    basename = normalized.rsplit("/", 1)[-1]
+    _, _, ext = basename.rpartition(".")
+    if not ext or "." not in basename:
+        return False
+    return f".{ext.lower()}" in OPAQUE_ZIP_DOCUMENT_EXTENSIONS
+
+
 def _write_output(out_dir: Path, rel_path: str, data: bytes) -> None:
     out_path = out_dir / rel_path
     # Defense in depth: even though rel_path is built from sanitized names,
@@ -149,7 +182,7 @@ def _process(
     try:
         raw_kind = sniff_kind(raw)
         if raw_kind != "binary":
-            if raw_kind == "zip":
+            if raw_kind == "zip" and not _is_opaque_zip_document(name):
                 try:
                     _recurse_zip(raw, key, out_dir, rel_path + "/", results)
                 except _CorruptZipError as exc:
@@ -180,7 +213,7 @@ def _process(
             )
             return
 
-        if blob.kind == "zip":
+        if blob.kind == "zip" and not _is_opaque_zip_document(name):
             try:
                 _recurse_zip(blob.data, key, out_dir, rel_path + "/", results)
             except _CorruptZipError as exc:
