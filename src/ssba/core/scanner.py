@@ -29,19 +29,36 @@ NEVER_RECURSE_EXTENSIONS = frozenset({".apk", ".jar"})
 _ODF_MIMETYPE_PREFIX = b"application/vnd.oasis.opendocument."
 _EPUB_MIMETYPE = b"application/epub+zip"
 
+# A real ODF/EPUB "mimetype" entry is a small, fixed string well under 64
+# bytes - there is never a legitimate reason to read more than this many
+# bytes of it. Used to bound both the declared-size pre-check and the
+# actual read in _is_recognized_mimetype_entry, so a crafted zip can't
+# force a large decompression just by being peeked at (see that
+# function's docstring).
+_MIMETYPE_PEEK_LIMIT = 256
+
 # Smart Switch's own internal wrapper containers, reverse-engineered by
 # hand against a real backup (see docs/superpowers/specs/
 # 2026-09-22-core-decrypt-engine-design.md, Background section, for how
 # each of these was identified). These are Smart Switch's own packaging,
 # not the user's files, and must be opened to reach real recoverable data.
 #
-# Anything NOT in this catalog defaults to "preserve as-is, don't unpack" -
-# the safe choice for content we don't have specific, verified knowledge
-# about. This replaces an earlier, more general "category is flat vs has
-# subdirectories" structural heuristic: that approach was reconsidered as
-# too fragile (it had a real edge case around SAMSUNGNOTE's own
-# SmartSwitchRestoreDB/ subdirectory appearing mid-recursion) in favor of
-# this small, explicit, hand-verified list.
+# Anything NOT recognized by this catalog, by KNOWN_SMART_SWITCH_EXTENSIONS,
+# or by the category-name wrapper pattern (see _is_known_smart_switch_container)
+# defaults to "preserve as-is, don't unpack" - the safe choice for content
+# we don't have specific, verified knowledge about. This replaces an
+# earlier, more general "category is flat vs has subdirectories"
+# structural heuristic: that approach was reconsidered as too fragile (it
+# had a real edge case around SAMSUNGNOTE's own SmartSwitchRestoreDB/
+# subdirectory appearing mid-recursion) in favor of this small, explicit,
+# hand-verified list.
+#
+# CALLLOG.zip is kept here even though it's also subsumed by the general
+# category-name wrapper pattern below (it lives under a category literally
+# named CALLLOG in every real backup) - purely so it keeps being recognized
+# under the arbitrarily-named test categories the existing test suite uses
+# it under as a stand-in "known container" filename. No functional
+# difference for real backups either way.
 KNOWN_SMART_SWITCH_CONTAINERS = frozenset({
     "sdoc.snmm",       # SAMSUNGNOTE: outer wrapper, contains sdoc.bk and small metadata files
     "sdoc.bk",         # SAMSUNGNOTE: the actual encrypted note database + note packages
@@ -169,6 +186,31 @@ def _basename(name: str) -> str:
     return name.replace("\\", "/").rsplit("/", 1)[-1]
 
 
+def _extension(basename: str) -> str | None:
+    """The lowercased, dot-prefixed final extension of `basename` (e.g.
+    ".sdocx"), or None if `basename` has no "." at all.
+
+    Deliberately NOT implemented with str.rpartition("."): rpartition
+    returns ("", "", basename) - not empty pieces - when the separator
+    isn't present at all, so a dotless name like "sdocx" would otherwise
+    be misread as having extension "sdocx" (its rpartition "after" piece
+    equals the whole string). This explicit "." in basename check is the
+    fix for that.
+    """
+    if "." not in basename:
+        return None
+    return f".{basename.rsplit('.', 1)[1].lower()}"
+
+
+def _stem(basename: str) -> str:
+    """`basename` with its final extension (if any) stripped. A dotless
+    name is returned unchanged (there's nothing to strip).
+    """
+    if "." not in basename:
+        return basename
+    return basename.rsplit(".", 1)[0]
+
+
 def _has_never_recurse_extension(name: str) -> bool:
     """True if `name` ends in an extension from NEVER_RECURSE_EXTENSIONS
     (currently .apk/.jar), case-insensitive. This is an explicit backstop
@@ -208,19 +250,55 @@ def _is_zip_shaped_document(data: bytes) -> bool:
             if "[Content_Types].xml" in names:
                 return True
             if "mimetype" in names:
-                try:
-                    mimetype = zf.read("mimetype")
-                except Exception:
-                    return False
-                return mimetype.startswith(_ODF_MIMETYPE_PREFIX) or mimetype == _EPUB_MIMETYPE
+                return _is_recognized_mimetype_entry(zf)
     except Exception:
         return False
     return False
 
 
-def _is_known_smart_switch_container(name: str) -> bool:
+def _is_recognized_mimetype_entry(zf: zipfile.ZipFile) -> bool:
+    """Bounded peek at an already-open zip's root "mimetype" entry, used by
+    _is_zip_shaped_document to recognize ODF/EPUB content.
+
+    This peek runs on every zip-shaped file the scanner encounters, even
+    ones that end up not being recursed - so it must never fully
+    decompress an attacker-controlled entry. A naive `zf.read("mimetype")`
+    does exactly that: it decompresses the whole entry into memory before
+    any comparison happens, which is a real memory-exhaustion vector for
+    what's supposed to be a cheap peek (a crafted zip well under 100KB can
+    carry a "mimetype" entry that deflates to tens of megabytes or more).
+    A real ODF/EPUB mimetype value is always small and fixed (see
+    _MIMETYPE_PEEK_LIMIT), so there's no legitimate reason to ever need
+    more than that many bytes.
+
+    Two layers of bounding, both against _MIMETYPE_PEEK_LIMIT:
+    1. A cheap check of the entry's declared (central-directory)
+       file_size, to reject an obviously-oversized entry without opening
+       it at all.
+    2. Even if that declared size were somehow wrong, the actual read
+       goes through zf.open("mimetype").read(N) rather than zf.read(...):
+       ZipExtFile.read(n) decompresses incrementally and stops once n
+       bytes have been produced, regardless of what the entry's header
+       claims - so this stays bounded independent of the size check.
+    """
+    try:
+        info = zf.getinfo("mimetype")
+    except KeyError:
+        return False
+    if info.file_size > _MIMETYPE_PEEK_LIMIT:
+        return False
+    try:
+        with zf.open("mimetype") as fh:
+            mimetype = fh.read(_MIMETYPE_PEEK_LIMIT)
+    except Exception:
+        return False
+    mimetype = mimetype.strip()
+    return mimetype.startswith(_ODF_MIMETYPE_PREFIX) or mimetype == _EPUB_MIMETYPE
+
+
+def _is_known_smart_switch_container(name: str, category: str) -> bool:
     """True if `name` is recognized as one of Smart Switch's own internal
-    wrapper containers, by either of two distinct mechanisms:
+    wrapper containers, by any of three distinct mechanisms:
 
     - Exact filename match against KNOWN_SMART_SWITCH_CONTAINERS,
       case-sensitive: a handful of specific, individually hand-verified
@@ -233,15 +311,32 @@ def _is_known_smart_switch_container(name: str) -> bool:
       just .sdocx) where the filenames themselves vary per instance (e.g.
       a note id) and can't be exact-name catalogued, but the extension
       alone is enough to know it's Smart Switch's own internal packaging.
+    - Category-name wrapper pattern: `name`'s basename, with its
+      extension stripped, exactly matches `category`. This is the general
+      form of a pattern CALLLOG.zip (under category CALLLOG) is one
+      hand-verified instance of - Smart Switch stores roughly 90
+      categories' payload in a wrapper file named identically to the
+      category folder itself (e.g. WIFICONFIG/WIFICONFIG.zip,
+      SBROWSER/SBROWSER.zip, HOMESCREEN/HOMESCREEN.zip - verified against
+      this repo's own earlier real-scan output). Rather than hardcode
+      every one of those ~90 names, this recognizes the pattern
+      generally. Matching is exact/case-sensitive, like the exact-name
+      catalog (both the category folder and its wrapper file are
+      Smart-Switch-generated). This only looks at the file's own
+      basename, not its nesting depth, so it applies at any recursion
+      depth reached while scanning a category - `category` is threaded
+      down unchanged regardless of how deep the recursion goes.
     """
     basename = _basename(name)
     if basename in KNOWN_SMART_SWITCH_CONTAINERS:
         return True
-    _, _, ext = basename.rpartition(".")
-    return bool(ext) and f".{ext.lower()}" in KNOWN_SMART_SWITCH_EXTENSIONS
+    ext = _extension(basename)
+    if ext is not None and ext in KNOWN_SMART_SWITCH_EXTENSIONS:
+        return True
+    return _stem(basename) == category
 
 
-def _should_recurse_into_zip(name: str, data: bytes) -> bool:
+def _should_recurse_into_zip(name: str, data: bytes, category: str) -> bool:
     """Decide whether zip-shaped content (raw-already-zip, or
     successfully-decrypted-to-zip) should be recursed into, combining the
     three detection mechanisms in order:
@@ -250,20 +345,25 @@ def _should_recurse_into_zip(name: str, data: bytes) -> bool:
        everything else.
     2. Content-based document detection - always wins if matched (OOXML /
        ODF / EPUB), never recurse, regardless of the file's name.
-    3. Known Smart Switch container catalog - only consulted if neither of
-       the above matched: recurse only if `name` is one of the small,
-       hand-verified set of Smart Switch's own wrapper containers
-       (KNOWN_SMART_SWITCH_CONTAINERS). Everything else - unknown zips,
-       the user's own plain .zip files, anything not specifically
-       catalogued - is preserved as a single file, never recursed into.
-       This is a deliberately conservative default: only unwrap what has
-       been specifically verified to need unwrapping.
+    3. Known Smart Switch container recognition
+       (_is_known_smart_switch_container) - only consulted if neither of
+       the above matched: recurse if `name` is in the small, hand-verified
+       exact-name catalog (KNOWN_SMART_SWITCH_CONTAINERS), OR its
+       extension is in KNOWN_SMART_SWITCH_EXTENSIONS (currently .sdocx),
+       OR its name (minus extension) matches the category it's being
+       scanned under (the general "<CATEGORY>/<CATEGORY>.zip"-shaped
+       wrapper pattern). Everything else - unknown zips, the user's own
+       plain .zip files, anything not specifically recognized - is
+       preserved as a single file, never recursed into. This is a
+       deliberately conservative default: only unwrap what has been
+       specifically verified (by exact name, extension family, or the
+       category-name pattern) to need unwrapping.
     """
     if _has_never_recurse_extension(name):
         return False
     if _is_zip_shaped_document(data):
         return False
-    return _is_known_smart_switch_container(name)
+    return _is_known_smart_switch_container(name, category)
 
 
 def _write_output(out_dir: Path, rel_path: str, data: bytes) -> None:
@@ -285,6 +385,7 @@ def _process(
     out_dir: Path,
     rel_prefix: str,
     results: list[FileResult],
+    category: str,
 ) -> None:
     safe_name = _sanitize_entry_name(name)
     if safe_name is None:
@@ -296,9 +397,9 @@ def _process(
     try:
         raw_kind = sniff_kind(raw)
         if raw_kind != "binary":
-            if raw_kind == "zip" and _should_recurse_into_zip(name, raw):
+            if raw_kind == "zip" and _should_recurse_into_zip(name, raw, category):
                 try:
-                    _recurse_zip(raw, key, out_dir, rel_path + "/", results)
+                    _recurse_zip(raw, key, out_dir, rel_path + "/", results, category)
                 except _CorruptZipError as exc:
                     _write_output(out_dir, rel_path, raw)
                     results.append(
@@ -327,9 +428,9 @@ def _process(
             )
             return
 
-        if blob.kind == "zip" and _should_recurse_into_zip(name, blob.data):
+        if blob.kind == "zip" and _should_recurse_into_zip(name, blob.data, category):
             try:
-                _recurse_zip(blob.data, key, out_dir, rel_path + "/", results)
+                _recurse_zip(blob.data, key, out_dir, rel_path + "/", results, category)
             except _CorruptZipError as exc:
                 _write_output(out_dir, rel_path, blob.data)
                 results.append(
@@ -351,6 +452,7 @@ def _recurse_zip(
     out_dir: Path,
     rel_prefix: str,
     results: list[FileResult],
+    category: str,
 ) -> None:
     try:
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
@@ -383,7 +485,7 @@ def _recurse_zip(
                     )
                 )
                 continue
-            _process(info.filename, raw, key, out_dir, rel_prefix, results)
+            _process(info.filename, raw, key, out_dir, rel_prefix, results, category)
             # _process always appends exactly one FileResult for this
             # entry's own path as the last thing it does (any results from
             # further recursion into a nested zip are appended before it),
@@ -427,7 +529,7 @@ def scan_category(
                 )
             )
             continue
-        _process(rel_name, raw, key, category_out_dir, "", result.files)
+        _process(rel_name, raw, key, category_out_dir, "", result.files, category)
     return result
 
 

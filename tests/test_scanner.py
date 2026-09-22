@@ -320,6 +320,30 @@ def test_scan_category_epub_content_detected_via_mimetype(tmp_path):
     assert result.files[0].kind == "zip"
 
 
+def test_scan_category_epub_mimetype_with_trailing_newline_still_detected(tmp_path):
+    """Regression test (M2): some real-world EPUB producers append a
+    trailing newline to the "mimetype" entry, even though the EPUB spec
+    forbids it. A byte-exact comparison would miss this and wrongly treat
+    the file as a generic zip; the comparison must strip surrounding
+    whitespace first.
+    """
+    _write_history_xml(tmp_path)
+
+    epub_bytes = _zip_bytes({"mimetype": b"application/epub+zip\n"})
+    (tmp_path / "CATEGORY_EPUB_NEWLINE").mkdir()
+    (tmp_path / "CATEGORY_EPUB_NEWLINE" / "book.epub").write_bytes(epub_bytes)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "CATEGORY_EPUB_NEWLINE", KEY, out_dir)
+
+    out_path = out_dir / "CATEGORY_EPUB_NEWLINE" / "book.epub"
+    assert out_path.is_file()
+    assert out_path.read_bytes() == epub_bytes
+    assert len(result.files) == 1
+    assert result.files[0].status == "plaintext_passthrough"
+    assert result.files[0].kind == "zip"
+
+
 def test_scan_category_generic_zip_not_recursed_regardless_of_surrounding_structure(tmp_path):
     """The catalog-based default doesn't care about the surrounding
     category's shape at all (an earlier design considered a "category is
@@ -497,6 +521,137 @@ def test_scan_category_sdocx_extension_recursed_as_known_container(tmp_path):
     )
     assert media_out.is_file(), ".sdocx must be recursed into to reach media/*"
     assert media_out.read_bytes() == media_content
+
+
+def test_scan_category_dotless_sdocx_filename_not_treated_as_extension_match(tmp_path):
+    """Regression test (M1): a file literally named "sdocx" (no dot at
+    all) must NOT be treated as having a ".sdocx" extension. This was a
+    real bug in the first .sdocx fix: str.rpartition(".") on a dotless
+    string returns ("", "", the_whole_string) rather than empty pieces,
+    so a naive `_, _, ext = basename.rpartition("."); bool(ext) and ...`
+    check misread a dotless "sdocx" as if its extension were "sdocx" and
+    incorrectly recursed into it. It's also not in
+    KNOWN_SMART_SWITCH_CONTAINERS and not a recognized document by
+    content, so under every other rule it must be preserved as-is too.
+    """
+    _write_history_xml(tmp_path)
+
+    generic_zip = _zip_bytes({"readme.txt": b"not a real note package"})
+
+    (tmp_path / "CATEGORY_DOTLESS").mkdir()
+    (tmp_path / "CATEGORY_DOTLESS" / "sdocx").write_bytes(generic_zip)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "CATEGORY_DOTLESS", KEY, out_dir)
+
+    out_path = out_dir / "CATEGORY_DOTLESS" / "sdocx"
+    assert out_path.is_file(), (
+        "a dotless file literally named 'sdocx' must be preserved as a "
+        "single file, not misread as having a .sdocx extension"
+    )
+    assert out_path.read_bytes() == generic_zip
+
+
+def test_scan_category_wrapper_named_after_category_is_recursed(tmp_path):
+    """Important #1: ~90 real Smart Switch categories store their payload
+    in a wrapper file named identically to the category folder itself
+    (e.g. WIFICONFIG/WIFICONFIG.zip, SBROWSER/SBROWSER.zip,
+    HOMESCREEN/HOMESCREEN.zip - verified against this repo's own earlier
+    real-scan output at out/real-scan/). CALLLOG.zip was hand-catalogued
+    as one specific instance of this, but the general pattern - the
+    wrapper's name, minus extension, equals the category it lives in -
+    was missing, so all ~90 other categories following the same pattern
+    silently stopped being opened at all once the catalog-based design
+    landed (a real, silent loss of decrypted data, not just an unpacking
+    preference). This models the WIFICONFIG shape directly: a category
+    whose sole top-level file is named exactly like the category itself,
+    zip-shaped, not otherwise catalogued/content-matched, must be
+    recursed into.
+    """
+    _write_history_xml(tmp_path)
+
+    payload_zip = _zip_bytes(
+        {
+            "WifiConfigStore.xml": b"<?xml version='1.0'?><WifiConfigStoreData/>",
+            "wpa_supplicant.conf": b"just some plain config text",
+        }
+    )
+
+    (tmp_path / "WIFICONFIG").mkdir()
+    (tmp_path / "WIFICONFIG" / "WIFICONFIG.zip").write_bytes(payload_zip)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "WIFICONFIG", KEY, out_dir)
+
+    assert result.counts()["error"] == 0, f"expected no errors, got {result.files}"
+
+    wrapper_out = out_dir / "WIFICONFIG" / "WIFICONFIG.zip"
+    assert not wrapper_out.is_file(), (
+        "WIFICONFIG.zip's name (minus extension) matches its category "
+        "WIFICONFIG, so it must be recursed into, not preserved whole"
+    )
+    xml_out = wrapper_out / "WifiConfigStore.xml"
+    assert xml_out.is_file()
+    assert xml_out.read_bytes() == b"<?xml version='1.0'?><WifiConfigStoreData/>"
+    conf_out = wrapper_out / "wpa_supplicant.conf"
+    assert conf_out.is_file()
+    assert conf_out.read_bytes() == b"just some plain config text"
+
+
+def test_is_zip_shaped_document_rejects_oversized_mimetype_entry_without_reading(monkeypatch):
+    """Important #2: a crafted zip can declare a "mimetype" entry whose
+    declared/actual size is enormous relative to a real ODF/EPUB mimetype
+    value (a few dozen bytes) - this peek runs on every zip-shaped file
+    the scanner encounters, so it must reject an oversized entry via the
+    cheap declared-size check BEFORE ever attempting to open/decompress
+    it, staying bounded regardless of how large the entry's real content
+    is.
+
+    To prove this structurally rather than asserting on timing (which
+    would be fragile) - and without relying on an exception that would be
+    silently swallowed by _is_zip_shaped_document's own broad
+    try/except (which would make a "raise if opened" assertion pass for
+    the wrong reason under BOTH the old and new implementation) - this
+    records whether zipfile.ZipFile.open() is ever invoked for the
+    "mimetype" entry at all, without altering its behavior. Under the old,
+    unbounded `zf.read("mimetype")` implementation this list would be
+    non-empty (ZipFile.read() opens the entry internally before reading
+    it fully); under the fixed implementation, the declared-size check
+    rejects the entry before open() is ever reached, so the list stays
+    empty.
+    """
+    from ssba.core.scanner import _is_zip_shaped_document
+
+    # Highly compressible content: ~5MB of a repeated byte, deflated down
+    # to a small on-disk size - moderately oversized (not maximally
+    # extreme), but comfortably beyond any real mimetype value and enough
+    # to demonstrate the bound matters (a naive zf.read("mimetype") would
+    # decompress the full 5MB before ever comparing anything).
+    oversized_mimetype = b"A" * (5 * 1024 * 1024)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", oversized_mimetype)
+    data = buf.getvalue()
+
+    opened_mimetype_entries: list[bool] = []
+    original_open = zipfile.ZipFile.open
+
+    def tracking_open(self, name, *args, **kwargs):
+        entry_name = getattr(name, "filename", name)
+        if entry_name == "mimetype":
+            opened_mimetype_entries.append(True)
+        return original_open(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", tracking_open)
+
+    result = _is_zip_shaped_document(data)
+
+    assert result is False
+    assert opened_mimetype_entries == [], (
+        "an oversized mimetype entry must be rejected via its declared "
+        "size before ever being opened/decompressed at all - got "
+        f"{len(opened_mimetype_entries)} open() call(s)"
+    )
 
 
 def test_scan_category_undecodable_file(tmp_path):
