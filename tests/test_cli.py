@@ -4,6 +4,7 @@ import json
 
 from ssba.cli.main import run
 from ssba.core.crypto import derive_key
+from tests.contact_fixtures import build_scan_dir
 from tests.crypto_helpers import encrypt_dummy_ecb, encrypt_iv_prefixed
 
 FAKE_DUMMY = "AABBCCDDEEFF00112233445566778899AABB"
@@ -108,3 +109,23 @@ def test_run_scan_missing_backup_history(tmp_path, capsys):
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "backupHistoryInfo.xml" in captured.err
+
+
+def test_export_contacts_success(tmp_path, capsys):
+    scan_dir = build_scan_dir(tmp_path / "scan")
+    out = tmp_path / "contacts.vcf"
+
+    exit_code = run(["export", "contacts", str(scan_dir), "--out", str(out)])
+
+    assert exit_code == 0
+    assert out.is_file()
+    captured = capsys.readouterr()
+    assert "profile.vcf: 1 contacts" in captured.out
+    assert "4 contacts written to" in captured.out
+
+
+def test_export_contacts_missing_report(tmp_path, capsys):
+    exit_code = run(["export", "contacts", str(tmp_path), "--out", str(tmp_path / "c.vcf")])
+
+    assert exit_code == 1
+    assert "report.json" in capsys.readouterr().err

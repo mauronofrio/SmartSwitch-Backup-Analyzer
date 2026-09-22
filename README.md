@@ -45,6 +45,18 @@ ssba scan "C:\Users\<you>\Samsung\SmartSwitch\backup\<device>\<backup_folder>" -
 This writes decrypted category data under `./recovered/<CATEGORY>/...` and a
 `./recovered/report.json` summary.
 
+Then turn the recovered contacts into one file you can import on any phone or
+contacts service (Google Contacts, iCloud, Outlook, another Android phone):
+
+```bash
+ssba export contacts ./recovered --out contacts.vcf
+```
+
+It merges every account's contacts found in the backup — including contacts
+that were stored only on the phone and never synced anywhere — plus your own
+profile card, as vCard 3.0. Any card that can't be read is kept unchanged in
+`contacts_unparsed.vcf` instead of being dropped.
+
 **This tool only supports "basic" (no backup password) Smart Switch
 backups.** Password/PIN-protected backups are not supported yet.
 
