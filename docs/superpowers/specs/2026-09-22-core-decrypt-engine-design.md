@@ -156,14 +156,53 @@ src/ssba/
     final review against a real 49GB backup, to silently skip 17,641 real
     files including 13,127 photos — corrected to recursive before Phase 1
     was considered done):
-    - If it's a valid ZIP already (unencrypted outer wrapper, e.g.
-      `Contact.spbm`, `CALLLOG.zip`): open it, recurse into its entries
-      (files that themselves decrypt successfully, or are already
-      plaintext/media, are kept; nothing here should be assumed encrypted
-      just because it's inside a wrapper zip).
-    - Else: attempt `container.decrypt_file`. If the sniffed kind is
-      `binary` *and* decryption didn't produce a recognizable structure,
-      record it as `undecoded` rather than guessing.
+    - If it's a valid ZIP already (unencrypted outer wrapper) or decrypts to
+      one, whether to open it and recurse into its entries is **not** a
+      blanket default — an earlier version of this spec described "any
+      valid ZIP gets opened," but inspection against the real 49GB backup
+      found this exploded the user's own Office documents and plain `.zip`
+      files into directories of raw parts. The actual rule, in precedence
+      order (see `scanner.py`'s `_should_recurse_into_zip` /
+      `_is_known_smart_switch_container`):
+      1. `.apk`/`.jar` (by extension, case-insensitive) → never recurse,
+         always preserved as a single file, regardless of anything else.
+      2. Content-based document detection: a root-level
+         `[Content_Types].xml` entry (Office Open XML — docx/xlsx/pptx/…,
+         regardless of the file's own name/extension) or a root-level
+         `mimetype` entry starting with `application/vnd.oasis.opendocument.`
+         (ODF) or equal to `application/epub+zip` (EPUB) → never recurse,
+         preserved as a single file.
+      3. Known Smart Switch container recognition — recurse only if the
+         file is recognized as Smart Switch's own internal packaging, by
+         any of:
+         - Exact filename match against a small, hand-verified catalog
+           (`sdoc.snmm`, `sdoc.bk`, `Contact.spbm`, `Contact.bk`,
+           `CALLLOG.zip`);
+         - A known proprietary extension (currently `.sdocx`, Samsung
+           Notes' per-note package format — the id varies per note, so
+           these can't be exact-name catalogued);
+         - The file's name, minus extension, exactly matches the category
+           folder it's being scanned under (e.g. `WIFICONFIG/WIFICONFIG.zip`,
+           `SBROWSER/SBROWSER.zip`) — roughly 90 real categories store
+           their payload in a wrapper named identically to the category
+           itself; this general pattern subsumes `CALLLOG.zip` as one
+           instance of it.
+      4. Otherwise → **do not recurse**; preserve as a single file. This is
+         the default for anything not specifically recognized above,
+         including the user's own arbitrary `.zip` files and any Smart
+         Switch container not yet identified by one of the three
+         mechanisms above.
+
+      Whether or not a zip is recursed into, decryption of its own bytes
+      (if it arrived encrypted) still always happens first and
+      independently — the recursion decision above only controls whether
+      the (already decrypted, if necessary) zip's *entries* are unpacked
+      further, not whether the file itself gets decrypted.
+    - Whatever the outcome above, attempt `container.decrypt_file` on any
+      file that doesn't already sniff as zip/media/plaintext. If the
+      sniffed kind is `binary` *and* decryption didn't produce a
+      recognizable structure, record it as `undecoded` rather than
+      guessing.
   - Returns a `CategoryResult` with per-file status (`decrypted`,
     `plaintext_passthrough`, `undecoded`, `error`) — never raises for a
     single file's failure; the category-level scan always completes.
