@@ -2,11 +2,34 @@
 
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import vobject
 
 _CARD_RE = re.compile(r"BEGIN:VCARD.*?END:VCARD", re.DOTALL)
+_EXPORTABLE_STATUSES = {"decrypted", "plaintext_passthrough"}
+
+
+class ContactExportError(Exception):
+    """Raised when no contacts can be exported from a scan output directory."""
+
+
+@dataclass(frozen=True)
+class ContactSource:
+    path: Path
+    label: str
+    is_profile: bool
+
+
+@dataclass
+class ContactExportResult:
+    exported: int
+    per_source: dict[str, int] = field(default_factory=dict)
+    unparsed: int = 0
+    unparsed_path: Path | None = None
 
 
 def _sanitize(card: str) -> str:
@@ -96,3 +119,61 @@ def parse_cards(text: str) -> tuple[list, list[str]]:
             continue
         cards.append(_normalize(card))
     return cards, unparsed
+
+
+def find_contact_sources(scan_dir: Path) -> list[ContactSource]:
+    report_path = scan_dir / "report.json"
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ContactExportError(f"report.json not found in {scan_dir}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ContactExportError(f"report.json is not readable: {exc}") from exc
+
+    category = next(
+        (c for c in report.get("categories", []) if c.get("category") == "CONTACT"),
+        None,
+    )
+    if category is None:
+        raise ContactExportError("the scan report has no CONTACT category")
+
+    sources = []
+    for entry in category.get("files", []):
+        rel = entry.get("path", "")
+        if not rel.lower().endswith(".vcf") or entry.get("status") not in _EXPORTABLE_STATUSES:
+            continue
+        path = scan_dir / "CONTACT" / rel
+        if not path.is_file():
+            continue
+        label = path.name
+        sources.append(ContactSource(path=path, label=label, is_profile=label.lower() == "profile.vcf"))
+    sources.sort(key=lambda s: (not s.is_profile, s.label))
+    return sources
+
+
+def export_contacts(scan_dir: Path, out_path: Path) -> ContactExportResult:
+    sources = find_contact_sources(scan_dir)
+    if not sources:
+        raise ContactExportError("no contact .vcf files found in the scan output")
+
+    serialized: list[str] = []
+    unparsed: list[str] = []
+    result = ContactExportResult(exported=0)
+    for source in sources:
+        cards, bad = parse_cards(source.path.read_text(encoding="utf-8", errors="replace"))
+        serialized.extend(card.serialize() for card in cards)
+        unparsed.extend(bad)
+        result.per_source[source.label] = len(cards)
+        result.exported += len(cards)
+
+    if result.exported == 0:
+        raise ContactExportError("no contacts could be parsed from the recovered .vcf files")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("".join(serialized), encoding="utf-8", newline="")
+    if unparsed:
+        unparsed_path = out_path.with_name(f"{out_path.stem}_unparsed.vcf")
+        unparsed_path.write_text("\r\n".join(unparsed) + "\r\n", encoding="utf-8", newline="")
+        result.unparsed = len(unparsed)
+        result.unparsed_path = unparsed_path
+    return result
