@@ -34,6 +34,7 @@ def test_quoted_printable_utf8_name_with_emoji_is_decoded():
     card = _one(_card("N;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:;=C3=80nna=F0=9F=92=8B Test;;;"))
     assert card.n.value.given == "Ànna💋 Test"
     assert card.fn.value == "Ànna💋 Test"
+    assert "CHARSET" not in card.n.params
 
 
 def test_group_member_becomes_deduplicated_categories():
@@ -67,7 +68,6 @@ def test_v21_parameters_become_v3_type_and_encoding():
     card = _one(_card("N:Rossi;Mario;;;", "TEL;CELL;PREF:+39 333 000 0001"))
     assert card.tel.params.get("TYPE") == ["CELL", "PREF"]
     assert card.tel.singletonparams == []
-    assert "CHARSET" not in card.n.params
     out = card.serialize()
     assert "VERSION:3.0" in out
     assert "TEL;TYPE=CELL,PREF:+39 333 000 0001" in out
