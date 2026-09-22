@@ -127,22 +127,53 @@ def find_contact_sources(scan_dir: Path) -> list[ContactSource]:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ContactExportError(f"report.json not found in {scan_dir}") from exc
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ContactExportError(f"report.json is not readable: {exc}") from exc
 
+    # Validate report structure: top level must be dict, categories must be list
+    if not isinstance(report, dict):
+        raise ContactExportError(f"report.json is not readable: top level is not an object")
+    categories = report.get("categories", [])
+    if not isinstance(categories, list):
+        raise ContactExportError(f"report.json is not readable: categories is not a list")
+
     category = next(
-        (c for c in report.get("categories", []) if c.get("category") == "CONTACT"),
+        (c for c in categories if isinstance(c, dict) and c.get("category") == "CONTACT"),
         None,
     )
     if category is None:
         raise ContactExportError("the scan report has no CONTACT category")
 
+    # Validate files is a list
+    files = category.get("files", [])
+    if not isinstance(files, list):
+        files = []
+
     sources = []
-    for entry in category.get("files", []):
+    contact_root = scan_dir / "CONTACT"
+    try:
+        contact_root_resolved = contact_root.resolve()
+    except (OSError, ValueError):
+        contact_root_resolved = contact_root
+
+    for entry in files:
+        # Skip non-dict entries
+        if not isinstance(entry, dict):
+            continue
         rel = entry.get("path", "")
+        # Skip entries with non-string or empty paths
+        if not isinstance(rel, str) or not rel:
+            continue
         if not rel.lower().endswith(".vcf") or entry.get("status") not in _EXPORTABLE_STATUSES:
             continue
-        path = scan_dir / "CONTACT" / rel
+        path = contact_root / rel
+        # Check that resolved path stays within contact_root (defense against path traversal)
+        try:
+            path_resolved = path.resolve()
+            if not path_resolved.is_relative_to(contact_root_resolved):
+                continue
+        except (OSError, ValueError):
+            continue
         if not path.is_file():
             continue
         label = path.name

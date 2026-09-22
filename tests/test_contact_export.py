@@ -66,3 +66,74 @@ def test_export_with_no_vcf_sources_raises(tmp_path):
     )
     with pytest.raises(ContactExportError, match="no contact"):
         export_contacts(tmp_path, tmp_path / "contacts.vcf")
+
+
+def test_find_sources_with_invalid_report_structure_raises(tmp_path):
+    """report.json that is a JSON array instead of object should raise ContactExportError."""
+    (tmp_path / "report.json").write_text("[]", encoding="utf-8")
+    with pytest.raises(ContactExportError, match="not readable"):
+        find_contact_sources(tmp_path)
+
+
+def test_find_sources_with_non_utf8_report_raises(tmp_path):
+    """report.json with invalid UTF-8 bytes should raise ContactExportError."""
+    (tmp_path / "report.json").write_bytes(b"\xff\xfe{")
+    with pytest.raises(ContactExportError, match="not readable"):
+        find_contact_sources(tmp_path)
+
+
+def test_find_sources_skips_malformed_entries(tmp_path):
+    """CONTACT files with non-dict entries, null paths, etc. should be skipped, not crash."""
+    contact_dir = tmp_path / "CONTACT" / "Container"
+    contact_dir.mkdir(parents=True)
+    (contact_dir / "valid.vcf").write_text(PHONE_NAME, encoding="utf-8", newline="")
+
+    # Create report with various malformed entries
+    import json
+    files = [
+        "not a dict",  # non-dict entry
+        {"path": None, "status": "plaintext_passthrough"},  # null path
+        {"status": "plaintext_passthrough"},  # missing path
+        {"path": "Container/valid.vcf", "status": "plaintext_passthrough"},  # valid
+    ]
+    report = {
+        "categories": [
+            {"category": "CONTACT", "counts": {}, "files": files}
+        ]
+    }
+    (tmp_path / "report.json").write_text(json.dumps(report), encoding="utf-8")
+
+    sources = find_contact_sources(tmp_path)
+    assert len(sources) == 1
+    assert sources[0].label == "valid.vcf"
+
+
+def test_find_sources_skips_path_traversal_attempts(tmp_path):
+    """Paths escaping via .. or absolute paths should be skipped."""
+    contact_dir = tmp_path / "CONTACT"
+    contact_dir.mkdir(parents=True)
+
+    # Create a valid VCF inside the CONTACT dir
+    (contact_dir / "good.vcf").write_text(PHONE_NAME, encoding="utf-8", newline="")
+
+    # Create files outside the CONTACT dir that path traversal might find
+    (tmp_path / "outside.vcf").write_text(GOOGLE_VCF, encoding="utf-8", newline="")
+
+    # Create report with escaping attempts
+    import json
+    files = [
+        {"path": "good.vcf", "status": "plaintext_passthrough"},  # valid
+        {"path": "../outside.vcf", "status": "plaintext_passthrough"},  # escapes up
+        {"path": str(tmp_path / "direct.vcf"), "status": "plaintext_passthrough"},  # absolute path
+    ]
+    report = {
+        "categories": [
+            {"category": "CONTACT", "counts": {}, "files": files}
+        ]
+    }
+    (tmp_path / "report.json").write_text(json.dumps(report), encoding="utf-8")
+
+    sources = find_contact_sources(tmp_path)
+    # Only good.vcf should be included; the others should be skipped
+    assert len(sources) == 1
+    assert sources[0].label == "good.vcf"
