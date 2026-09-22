@@ -37,13 +37,20 @@ def sniff_kind(data: bytes) -> Kind:
         return "media"
 
     # Strip trailing null bytes (from AES-CBC zero-byte padding) and any
-    # leading/trailing whitespace, to ensure printable-ratio check is accurate
+    # leading/trailing whitespace, to ensure the text-detection check is accurate
     stripped = data.strip(b"\x00 \t\n\r\x0b\x0c")
     head = stripped[:256]
     if not head:
         return "binary"
-    printable = sum(1 for b in head if 32 <= b < 127 or b in (9, 10, 13))
-    if printable / len(head) < 0.95:
+    # Real backup content (Notes, Contacts, ...) is frequently non-ASCII
+    # (accented Latin, CJK, etc.), so an ASCII printable-byte-range check
+    # produces false negatives on genuine decrypted plaintext. Strict UTF-8
+    # validity is a much stronger signal: pseudorandom AES output essentially
+    # never decodes as valid UTF-8, while real UTF-8 text (ASCII or not)
+    # always does.
+    try:
+        head.decode("utf-8")
+    except UnicodeDecodeError:
         return "binary"
 
     if stripped[:5] == b"<?xml" or (stripped[:1] == b"<" and b">" in stripped[:256]):

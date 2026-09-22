@@ -93,3 +93,39 @@ def test_decrypt_file_recovers_xml():
     blob = decrypt_file(raw, KEY)
     assert blob.kind == "xml"
     assert blob.data.startswith(plaintext)
+
+
+def test_sniff_kind_accented_latin_text():
+    """Real Samsung Notes/Contacts content routinely contains accented Latin
+    characters (e.g. names like 'Frédéric', 'José'). The old ASCII-range
+    printable check (32 <= b < 127) rejected these as binary, causing the
+    scanner to discard correctly-decrypted plaintext and write raw
+    ciphertext instead.
+    """
+    text = "Café con José y Frédéric, très bien!".encode("utf-8")
+    assert sniff_kind(text) == "text"
+
+
+def test_sniff_kind_cjk_text():
+    text = "こんにちは世界 你好世界".encode("utf-8")
+    assert sniff_kind(text) == "text"
+
+
+def test_sniff_kind_xml_with_non_ascii_content():
+    xml = "<?xml version='1.0'?><note>café 世界</note>".encode("utf-8")
+    assert sniff_kind(xml) == "xml"
+
+
+def test_sniff_kind_json_with_non_ascii_content():
+    payload = '{"name": "José", "greeting": "こんにちは"}'.encode("utf-8")
+    assert sniff_kind(payload) == "json"
+
+
+def test_sniff_kind_invalid_utf8_still_binary():
+    """Pseudorandom AES output should essentially never decode as valid
+    UTF-8, so it must still be classified as binary after the fix.
+    """
+    # 0x80-0xBF are UTF-8 continuation bytes; a run of them with no leading
+    # byte is not valid UTF-8.
+    data = bytes([0xFF, 0xFE, 0x80, 0x81, 0x82, 0x83] * 40)
+    assert sniff_kind(data) == "binary"
