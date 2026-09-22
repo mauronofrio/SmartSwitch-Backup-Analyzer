@@ -28,6 +28,10 @@ def get_session_dummy(backup_root: Path) -> str:
         raise UnsupportedBackupError(
             f"backupHistoryInfo.xml is not valid XML: {exc}"
         ) from exc
+    except OSError as exc:
+        raise UnsupportedBackupError(
+            f"could not read backupHistoryInfo.xml: {exc}"
+        ) from exc
 
     dummy_elements = [
         element

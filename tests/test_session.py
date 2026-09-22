@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from ssba.core.errors import UnsupportedBackupError
@@ -52,3 +54,20 @@ def test_get_session_dummy_invalid_xml(tmp_path):
     (tmp_path / "backupHistoryInfo.xml").write_text("<not valid xml", encoding="utf-8")
     with pytest.raises(UnsupportedBackupError):
         get_session_dummy(tmp_path)
+
+
+def test_get_session_dummy_permission_error(tmp_path):
+    # Create a file that passes is_file() but raises OSError on read
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    file_path = tmp_path / "backupHistoryInfo.xml"
+    file_path.write_text("<test/>", encoding="utf-8")
+
+    # Remove read permissions to trigger PermissionError when ET.parse opens it
+    os.chmod(file_path, 0o000)
+
+    try:
+        with pytest.raises(UnsupportedBackupError):
+            get_session_dummy(tmp_path)
+    finally:
+        # Restore permissions so cleanup doesn't fail
+        os.chmod(file_path, 0o644)
