@@ -47,6 +47,30 @@ def test_sniff_kind_empty():
     assert sniff_kind(b"") == "binary"
 
 
+def test_sniff_kind_binary_starts_with_xml_tag():
+    """Test that binary data starting with < but mostly non-printable is classified as binary.
+
+    This reproduces the bug where pseudorandom AES-CBC output (from decrypting
+    non-encrypted .page binary files) gets misclassified as XML just because
+    it happens to start with < and contain > somewhere.
+    """
+    # Binary data starting with < and containing > but mostly non-printable
+    data = b"<" + bytes(range(200))
+    assert sniff_kind(data) == "binary", (
+        "Binary data starting with < should be classified as binary, "
+        "not XML, even if it contains >"
+    )
+
+
+def test_sniff_kind_binary_starts_with_json_brace():
+    """Test that binary data starting with { but mostly non-printable is classified as binary."""
+    data = b"{" + bytes(range(200))
+    assert sniff_kind(data) == "binary", (
+        "Binary data starting with { should be classified as binary, "
+        "not JSON"
+    )
+
+
 def test_decrypt_file_recovers_xml():
     plaintext = b"<?xml version='1.0'?><CallLogs></CallLogs>"
     raw = encrypt_iv_prefixed(plaintext, KEY)

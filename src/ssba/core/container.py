@@ -36,19 +36,20 @@ def sniff_kind(data: bytes) -> Kind:
     ):
         return "media"
 
-    stripped = data.lstrip()
+    # Strip leading/trailing whitespace and null bytes (from decryption padding)
+    stripped = data.strip(b"\x00 \t\n\r\x0b\x0c")
+    head = stripped[:256]
+    if not head:
+        return "binary"
+    printable = sum(1 for b in head if 32 <= b < 127 or b in (9, 10, 13))
+    if printable / len(head) < 0.95:
+        return "binary"
+
     if stripped[:5] == b"<?xml" or (stripped[:1] == b"<" and b">" in stripped[:256]):
         return "xml"
     if stripped[:1] in (b"{", b"["):
         return "json"
-
-    head = data[:256]
-    if head:
-        printable = sum(1 for b in head if 32 <= b < 127 or b in (9, 10, 13))
-        if printable / len(head) >= 0.95:
-            return "text"
-
-    return "binary"
+    return "text"
 
 
 def decrypt_file(raw: bytes, key: bytes) -> DecodedBlob:
