@@ -253,11 +253,11 @@ def _normalize(card, custom: list[str]):
         line.encoded = True
 
     categories: list[str] = []
-    for line in card.contents.get("categories", []):
-        categories.extend(v for v in line.value if v not in categories)
-    for group in card.contents.pop("group-member", []):
-        if group.value not in categories:
-            categories.append(group.value)
+    names = [v for line in card.contents.get("categories", []) for v in line.value]
+    names += [line.value for line in card.contents.pop("group-member", [])]
+    for name in names:
+        if name not in categories:
+            categories.append(name)
     if categories:
         card.contents.pop("categories", None)
         card.add("categories").value = categories

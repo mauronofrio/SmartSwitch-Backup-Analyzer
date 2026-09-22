@@ -267,6 +267,12 @@ def test_group_member_with_comma_is_one_category(qp):
     assert vobject.readOne(out).categories.value == ["Friends, Family", "Work"]
 
 
+def test_group_members_join_existing_categories_in_one_property():
+    out = _exported(_card("N:Rossi;Mario;;;", r"CATEGORIES:Work,Fan\, club", "GROUP_MEMBER:Work", "GROUP_MEMBER:Gym"))
+    assert out.count("CATEGORIES") == 1
+    assert vobject.readOne(out).categories.value == ["Work", "Fan, club", "Gym"]
+
+
 @pytest.mark.parametrize("qp", [False, True], ids=["plain", "qp"])
 def test_name_components_with_commas_survive(qp):
     if qp:
