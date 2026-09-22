@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import struct
 import zipfile
 from pathlib import Path
 
@@ -253,6 +254,102 @@ def _truncated_zip_bytes() -> bytes:
     return corrupt
 
 
+def _zip_bytes_with_mangled_version_needed() -> bytes:
+    """A structurally well-formed zip (valid magic, valid end-of-central-
+    directory record) but with the central directory's "version needed to
+    extract" field mangled to a bogus value. zipfile.ZipFile() reads this
+    at construction time and raises NotImplementedError - not
+    zipfile.BadZipFile - for zip file version fields it doesn't recognize.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("a.txt", b"hello world")
+    data = bytearray(buf.getvalue())
+    eocd = data.rfind(b"PK\x05\x06")
+    assert eocd != -1
+    cd_offset = struct.unpack("<I", data[eocd + 16 : eocd + 20])[0]
+    assert data[cd_offset : cd_offset + 4] == b"PK\x01\x02"
+    # central directory file header: version needed to extract is the 2
+    # bytes at offset +6 from the header signature.
+    data[cd_offset + 6 : cd_offset + 8] = struct.pack("<H", 0xFFFF)
+    return bytes(data)
+
+
+def _zip_bytes_with_unsupported_compression() -> bytes:
+    """A zip that opens fine (valid central directory, valid version-needed
+    field) but whose single entry declares an unsupported compression
+    method. zipfile.ZipFile() construction succeeds and infolist() works,
+    but zf.read() on that entry raises NotImplementedError.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("only.txt", b"some data that would normally compress just fine")
+    data = bytearray(buf.getvalue())
+    assert data[0:4] == b"PK\x03\x04"
+    # Local file header: compression method is the 2 bytes at offset +8.
+    data[8:10] = struct.pack("<H", 99)
+    cd_sig_offset = data.find(b"PK\x01\x02")
+    assert cd_sig_offset != -1
+    # Central directory file header: compression method at offset +10.
+    data[cd_sig_offset + 10 : cd_sig_offset + 12] = struct.pack("<H", 99)
+    return bytes(data)
+
+
+def test_scan_category_zip_construction_notimplementederror_single_result_and_fallback_write(
+    tmp_path,
+):
+    """Finding 5, scenario 1: zipfile.ZipFile() can raise exceptions other
+    than BadZipFile for malformed input - confirmed reproducible with a
+    mangled "version needed to extract" field, which raises
+    NotImplementedError at construction time. That must be treated the
+    same as any other corrupt/unsupported zip: exactly one FileResult, and
+    the original bytes written as a fallback rather than silently lost.
+    """
+    _write_history_xml(tmp_path)
+    corrupt = _zip_bytes_with_mangled_version_needed()
+    (tmp_path / "CATEGORY_J").mkdir()
+    (tmp_path / "CATEGORY_J" / "badversion.zip").write_bytes(corrupt)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "CATEGORY_J", KEY, out_dir)
+
+    matching = [f for f in result.files if f.relative_path == "badversion.zip"]
+    assert len(matching) == 1, f"expected exactly one FileResult, got {matching}"
+    assert matching[0].status == "error"
+    written = out_dir / "CATEGORY_J" / "badversion.zip"
+    assert written.exists(), "original bytes must be written, not discarded"
+    assert written.read_bytes() == corrupt
+
+
+def test_scan_category_zip_entry_unsupported_compression_container_fallback(tmp_path):
+    """Finding 5, scenario 2: the zip itself opens fine, but its only entry
+    uses an unsupported compression method. zf.read() on that entry raises
+    NotImplementedError, which the existing per-entry try/except correctly
+    isolates as its own 'error' FileResult - but since that's the zip's
+    only entry, nothing at all ends up written for the container's own
+    path, so the container must not still be reported as a success
+    ('plaintext_passthrough') with nothing on disk to show for it.
+    """
+    _write_history_xml(tmp_path)
+    corrupt = _zip_bytes_with_unsupported_compression()
+    (tmp_path / "CATEGORY_K").mkdir()
+    (tmp_path / "CATEGORY_K" / "onlyentry.zip").write_bytes(corrupt)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "CATEGORY_K", KEY, out_dir)
+
+    matching = [f for f in result.files if f.relative_path == "onlyentry.zip"]
+    assert len(matching) == 1, (
+        f"expected exactly one FileResult for the container path, got {matching}"
+    )
+    assert matching[0].status == "error"
+    written = out_dir / "CATEGORY_K" / "onlyentry.zip"
+    assert written.exists(), (
+        "container bytes must be written when nothing inside the zip could be extracted"
+    )
+    assert written.read_bytes() == corrupt
+
+
 def test_scan_category_corrupt_raw_zip_single_result_and_fallback_write(tmp_path):
     """Finding 4, scenario 1: a raw file has zip magic bytes but a corrupt
     body. Exactly one FileResult must be recorded for it, and its bytes
@@ -290,3 +387,9 @@ def test_scan_category_corrupt_decrypted_zip_single_result_and_fallback_write(tm
     assert len(matching) == 1, f"expected exactly one FileResult, got {matching}"
     written = out_dir / "CATEGORY_G" / "sdoc.bk"
     assert written.exists(), "corrupt decrypted zip bytes must be written, not discarded"
+    # decrypt_iv_prefixed doesn't strip the zero-byte block padding applied
+    # by encrypt_iv_prefixed, so the written (decrypted) bytes are
+    # corrupt_inner plus zero padding up to the next 16-byte boundary, not
+    # byte-for-byte identical to corrupt_inner.
+    pad_len = (-len(corrupt_inner)) % 16
+    assert written.read_bytes() == corrupt_inner + b"\x00" * pad_len

@@ -74,16 +74,22 @@ def list_categories(backup_root: Path) -> list[str]:
 
 
 class _CorruptZipError(Exception):
-    """Internal signal that a zip container itself failed to open/parse.
+    """Internal signal that a zip container itself couldn't be turned into
+    usable output.
 
     This is distinct from a single bad member inside an otherwise-good zip
     (which _recurse_zip already handles correctly by recording a per-entry
-    error and continuing). Raised by _recurse_zip when zipfile.ZipFile()
-    fails at the whole-archive level, so _process can catch it *before*
-    deciding whether to write the container's own bytes - avoiding both
-    silent data loss (nothing written) and duplicate/contradictory results
-    (one FileResult from _process, a second from _recurse_zip) for the same
-    path.
+    error and continuing for that member alone). Raised by _recurse_zip in
+    two cases: (1) zipfile.ZipFile() fails at the whole-archive level - not
+    just zipfile.BadZipFile, but any exception the parser can raise on
+    malformed input (e.g. NotImplementedError for an unrecognized "version
+    needed to extract" field); or (2) the zip opens and has at least one
+    non-directory entry, but every single entry failed, so nothing was
+    actually written anywhere for this container despite it "successfully"
+    recursing. Either way, _process catches it *before* deciding whether to
+    write the container's own bytes - avoiding both silent data loss
+    (nothing written) and duplicate/contradictory results (one FileResult
+    from _process, a second from _recurse_zip) for the same path.
     """
 
 
@@ -201,14 +207,24 @@ def _recurse_zip(
 ) -> None:
     try:
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    except zipfile.BadZipFile as exc:
-        # Whole-archive failure: let the caller (_process) decide what to
-        # write and record, instead of appending our own FileResult here.
-        raise _CorruptZipError(str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - opening a zip from bytes we
+        # don't control (attacker- or corruption-influenced input) is
+        # exactly the kind of boundary where a broad catch is appropriate:
+        # zipfile.ZipFile() can fail with BadZipFile for a malformed
+        # central directory, but also with other exceptions such as
+        # NotImplementedError for a mangled "version needed to extract"
+        # field. All of these mean the same thing to us - "this isn't a
+        # zip we can recurse into" - so let the caller (_process) decide
+        # what to write and record, instead of appending our own
+        # FileResult here.
+        raise _CorruptZipError(f"{type(exc).__name__}: {exc}") from exc
+    had_entries = False
+    any_entry_succeeded = False
     with zf:
         for info in zf.infolist():
             if info.is_dir():
                 continue
+            had_entries = True
             try:
                 raw = zf.read(info)
             except Exception as exc:  # noqa: BLE001 - per-file isolation
@@ -221,6 +237,26 @@ def _recurse_zip(
                 )
                 continue
             _process(info.filename, raw, key, out_dir, rel_prefix, results)
+            # _process always appends exactly one FileResult for this
+            # entry's own path as the last thing it does (any results from
+            # further recursion into a nested zip are appended before it),
+            # so the most recently appended result reflects this entry's
+            # own outcome.
+            if results[-1].status != "error":
+                any_entry_succeeded = True
+
+    if had_entries and not any_entry_succeeded:
+        # The zip opened fine, but every single entry inside it failed
+        # (e.g. an unsupported compression method) - the per-entry
+        # try/except above already isolated each failure as its own
+        # FileResult, but that leaves nothing at all written for this
+        # zip's own path, which would otherwise still be reported a
+        # success ("plaintext_passthrough"/"decrypted") by the caller.
+        # Signal the same "corrupt/unsupported zip" failure used for a
+        # whole-archive open failure, so _process falls back to writing
+        # the container's own raw bytes and records a single error result
+        # for the container's own path.
+        raise _CorruptZipError("no entries could be extracted from this zip")
 
 
 def scan_category(
