@@ -17,22 +17,37 @@ from ssba.core.session import get_session_dummy
 
 FileStatus = Literal["decrypted", "plaintext_passthrough", "undecoded", "error"]
 
-# Zip-based container formats that must always be preserved as a single,
-# opaque file - never recursed into - even though sniff_kind correctly
-# reports their raw (or decrypted) bytes as kind="zip". These are Office
-# Open XML, legacy macro-enabled variants, OpenDocument formats, and EPUB:
-# real end-user documents a phone backup might contain, where the zip
-# structure is an implementation detail, not something a user wants exposed
-# as a directory of exploded XML parts. Smart Switch's own wrapper
-# containers (e.g. Contact.spbm, sdoc.snmm) are intentionally NOT in this
-# list, since those are disposable wrappers whose useful content is what's
-# inside them.
-OPAQUE_ZIP_DOCUMENT_EXTENSIONS = frozenset({
-    ".docx", ".docm", ".dotx", ".dotm",
-    ".xlsx", ".xlsm", ".xltx", ".xltm",
-    ".pptx", ".pptm", ".potx", ".potm", ".ppsx", ".ppsm",
-    ".odt", ".ods", ".odp", ".odg",
-    ".epub",
+# Extensions that must NEVER be recursed into, full stop - independent of
+# content sniffing and independent of the container catalog below. Android
+# application/library packages are zip containers, but unpacking them is
+# never useful output for this tool and the project owner was explicit
+# these should stay opaque regardless of where they turn up in a backup.
+NEVER_RECURSE_EXTENSIONS = frozenset({".apk", ".jar"})
+
+# OpenDocument formats' mimetype prefix/value, read from a zip's root-level
+# "mimetype" entry (see _is_zip_shaped_document below).
+_ODF_MIMETYPE_PREFIX = b"application/vnd.oasis.opendocument."
+_EPUB_MIMETYPE = b"application/epub+zip"
+
+# Smart Switch's own internal wrapper containers, reverse-engineered by
+# hand against a real backup (see docs/superpowers/specs/
+# 2026-09-22-core-decrypt-engine-design.md, Background section, for how
+# each of these was identified). These are Smart Switch's own packaging,
+# not the user's files, and must be opened to reach real recoverable data.
+#
+# Anything NOT in this catalog defaults to "preserve as-is, don't unpack" -
+# the safe choice for content we don't have specific, verified knowledge
+# about. This replaces an earlier, more general "category is flat vs has
+# subdirectories" structural heuristic: that approach was reconsidered as
+# too fragile (it had a real edge case around SAMSUNGNOTE's own
+# SmartSwitchRestoreDB/ subdirectory appearing mid-recursion) in favor of
+# this small, explicit, hand-verified list.
+KNOWN_SMART_SWITCH_CONTAINERS = frozenset({
+    "sdoc.snmm",       # SAMSUNGNOTE: outer wrapper, contains sdoc.bk and small metadata files
+    "sdoc.bk",         # SAMSUNGNOTE: the actual encrypted note database + note packages
+    "Contact.spbm",    # CONTACT: outer wrapper, contains Contact.bk
+    "Contact.bk",      # CONTACT: the actual encrypted contact database (-> profile.vcf etc.)
+    "CALLLOG.zip",     # CALLLOG: outer wrapper, contains call_log.exml
 })
 
 
@@ -137,19 +152,96 @@ def _sanitize_entry_name(name: str) -> str | None:
     return "/".join(parts)
 
 
-def _is_opaque_zip_document(name: str) -> bool:
-    """True if `name`'s extension marks it as a zip-based document format
-    that must be preserved as a single file rather than recursed into (see
-    OPAQUE_ZIP_DOCUMENT_EXTENSIONS). Extension matching is case-insensitive
-    and looks only at the final path segment, so it works whether `name` is
-    a plain filename or a zip entry path using "/" or "\\" separators.
+def _basename(name: str) -> str:
+    """Final path segment of `name`, whether it's a plain filename or a zip
+    entry path using "/" or "\\" separators.
     """
-    normalized = name.replace("\\", "/")
-    basename = normalized.rsplit("/", 1)[-1]
-    _, _, ext = basename.rpartition(".")
-    if not ext or "." not in basename:
+    return name.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _has_never_recurse_extension(name: str) -> bool:
+    """True if `name` ends in an extension from NEVER_RECURSE_EXTENSIONS
+    (currently .apk/.jar), case-insensitive. This is an explicit backstop
+    that wins regardless of content or category shape.
+    """
+    basename = _basename(name).lower()
+    return any(basename.endswith(ext) for ext in NEVER_RECURSE_EXTENSIONS)
+
+
+def _is_zip_shaped_document(data: bytes) -> bool:
+    """Peek inside zip-shaped bytes - without extracting anything - to
+    decide by CONTENT (not by the file's own name/extension) whether this
+    is an Office Open XML document (docx/xlsx/pptx/... - identified by a
+    root-level "[Content_Types].xml" entry, which every valid OOXML zip
+    has) or an OpenDocument/EPUB document (identified by a root-level
+    "mimetype" entry whose bytes start with "application/vnd.oasis.
+    opendocument." or equal "application/epub+zip" exactly). Either way,
+    the file must be preserved as a single opaque file, never recursed
+    into.
+
+    This exists because a file's extension can lie: real files were found
+    in the wild with a .pdf extension whose actual content was a
+    PowerPoint or Word document. Extension matching can't catch that -
+    content sniffing can, and it works regardless of what the file is
+    named.
+
+    If the zip can't even be opened here, this returns False ("not a
+    recognized document by content") rather than raising - this is a
+    cheap, best-effort additional signal layered before the real
+    recursion attempt, not a replacement for the existing corrupt-zip
+    handling (_CorruptZipError etc.) that already runs when a genuinely
+    malformed zip is actually recursed into.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = set(zf.namelist())
+            if "[Content_Types].xml" in names:
+                return True
+            if "mimetype" in names:
+                try:
+                    mimetype = zf.read("mimetype")
+                except Exception:
+                    return False
+                return mimetype.startswith(_ODF_MIMETYPE_PREFIX) or mimetype == _EPUB_MIMETYPE
+    except Exception:
         return False
-    return f".{ext.lower()}" in OPAQUE_ZIP_DOCUMENT_EXTENSIONS
+    return False
+
+
+def _is_known_smart_switch_container(name: str) -> bool:
+    """True if `name`'s basename exactly matches one of Smart Switch's own
+    known internal wrapper containers (KNOWN_SMART_SWITCH_CONTAINERS).
+    Matching is by exact filename, case-sensitive: these are fixed,
+    Smart-Switch-generated names, not user-supplied ones (unlike the
+    document-extension case, which needed case-insensitivity because users
+    and apps produce inconsistently-cased filenames).
+    """
+    return _basename(name) in KNOWN_SMART_SWITCH_CONTAINERS
+
+
+def _should_recurse_into_zip(name: str, data: bytes) -> bool:
+    """Decide whether zip-shaped content (raw-already-zip, or
+    successfully-decrypted-to-zip) should be recursed into, combining the
+    three detection mechanisms in order:
+
+    1. .apk/.jar backstop - always wins, never recurse, regardless of
+       everything else.
+    2. Content-based document detection - always wins if matched (OOXML /
+       ODF / EPUB), never recurse, regardless of the file's name.
+    3. Known Smart Switch container catalog - only consulted if neither of
+       the above matched: recurse only if `name` is one of the small,
+       hand-verified set of Smart Switch's own wrapper containers
+       (KNOWN_SMART_SWITCH_CONTAINERS). Everything else - unknown zips,
+       the user's own plain .zip files, anything not specifically
+       catalogued - is preserved as a single file, never recursed into.
+       This is a deliberately conservative default: only unwrap what has
+       been specifically verified to need unwrapping.
+    """
+    if _has_never_recurse_extension(name):
+        return False
+    if _is_zip_shaped_document(data):
+        return False
+    return _is_known_smart_switch_container(name)
 
 
 def _write_output(out_dir: Path, rel_path: str, data: bytes) -> None:
@@ -182,7 +274,7 @@ def _process(
     try:
         raw_kind = sniff_kind(raw)
         if raw_kind != "binary":
-            if raw_kind == "zip" and not _is_opaque_zip_document(name):
+            if raw_kind == "zip" and _should_recurse_into_zip(name, raw):
                 try:
                     _recurse_zip(raw, key, out_dir, rel_path + "/", results)
                 except _CorruptZipError as exc:
@@ -213,7 +305,7 @@ def _process(
             )
             return
 
-        if blob.kind == "zip" and not _is_opaque_zip_document(name):
+        if blob.kind == "zip" and _should_recurse_into_zip(name, blob.data):
             try:
                 _recurse_zip(blob.data, key, out_dir, rel_path + "/", results)
             except _CorruptZipError as exc:

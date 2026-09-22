@@ -51,7 +51,7 @@ def _build_fake_backup(backup_root: Path) -> None:
         }
     )
     (backup_root / "CATEGORY_B").mkdir()
-    (backup_root / "CATEGORY_B" / "wrapper.spbm").write_bytes(outer_zip)
+    (backup_root / "CATEGORY_B" / "Contact.spbm").write_bytes(outer_zip)
 
     # Category C: data that isn't really encrypted with this scheme at all
     (backup_root / "CATEGORY_C").mkdir()
@@ -74,14 +74,19 @@ def test_scan_category_direct_encrypted_file(tmp_path):
 
 
 def test_scan_category_wrapped_zip(tmp_path):
+    """Contact.spbm is one of the known Smart Switch wrapper containers
+    (KNOWN_SMART_SWITCH_CONTAINERS), so it must still be recursed into by
+    exact-name catalog match, even though it isn't a recognized document
+    by content and its extension carries no special meaning.
+    """
     _build_fake_backup(tmp_path)
     out_dir = tmp_path / "out"
     result = scan_category(tmp_path, "CATEGORY_B", KEY, out_dir)
     counts = result.counts()
-    assert counts["plaintext_passthrough"] == 2  # wrapper.spbm itself + readme.txt
+    assert counts["plaintext_passthrough"] == 2  # Contact.spbm itself + readme.txt
     assert counts["decrypted"] == 1  # Contact.bk
-    assert (out_dir / "CATEGORY_B" / "wrapper.spbm" / "Contact.bk").exists()
-    assert (out_dir / "CATEGORY_B" / "wrapper.spbm" / "readme.txt").read_bytes() == (
+    assert (out_dir / "CATEGORY_B" / "Contact.spbm" / "Contact.bk").exists()
+    assert (out_dir / "CATEGORY_B" / "Contact.spbm" / "readme.txt").read_bytes() == (
         b"already plaintext, should pass through untouched"
     )
 
@@ -123,11 +128,17 @@ def test_scan_category_docx_preserved_as_opaque_file(tmp_path):
     assert file_result.kind == "zip"
 
 
-def test_scan_category_non_document_zip_still_recursed(tmp_path):
-    """Guard against the opaque-document fix being too broad: a zip-shaped
-    file whose extension is NOT in the document allowlist (e.g. Smart
-    Switch's own wrapper containers, or a plain .zip) must keep the old
-    recurse-and-explode behavior.
+def test_scan_category_non_catalog_zip_preserved_not_recursed(tmp_path):
+    """The conservative default: a zip-shaped file that is neither a
+    recognized document by content (no "[Content_Types].xml" or
+    "mimetype") NOR an exact-name match in KNOWN_SMART_SWITCH_CONTAINERS
+    must be preserved as a single, opaque file - never recursed into. This
+    covers both the user's own arbitrary .zip files and any Smart
+    Switch-internal container we haven't specifically hand-verified, and
+    is a real behavior change from the pre-this-change code (which
+    recursed into any zip by default): the project owner explicitly
+    preferred this safe, conservative default over unpacking anything not
+    specifically catalogued.
     """
     _write_history_xml(tmp_path)
 
@@ -140,11 +151,13 @@ def test_scan_category_non_document_zip_still_recursed(tmp_path):
     result = scan_category(tmp_path, "CATEGORY_F", KEY, out_dir)
 
     wrapper_out_path = out_dir / "CATEGORY_F" / "Contact.zip"
-    assert not wrapper_out_path.is_file(), "non-document zip should not be preserved as a flat file"
-    assert (wrapper_out_path / "readme.txt").read_bytes() == b"plain content inside wrapper"
+    assert wrapper_out_path.is_file(), (
+        "non-catalogued, non-document zip must be preserved as a single file, not exploded"
+    )
+    assert wrapper_out_path.read_bytes() == wrapper_zip
 
     counts = result.counts()
-    assert counts["plaintext_passthrough"] == 2  # Contact.zip itself + readme.txt
+    assert counts["plaintext_passthrough"] == 1  # Contact.zip itself, not recursed
 
 
 def test_scan_category_encrypted_docx_preserved_as_opaque_file(tmp_path):
@@ -197,7 +210,11 @@ def test_scan_category_encrypted_docx_preserved_as_opaque_file(tmp_path):
 
 
 def test_scan_category_docx_extension_matched_case_insensitively(tmp_path):
-    """The document-extension allowlist check must be case-insensitive."""
+    """Content-based document detection doesn't look at the extension at
+    all, so it's inherently case-insensitive (and extension-insensitive) -
+    this is a lightweight regression check that an uppercase ".DOCX" name
+    doesn't somehow interfere with the content sniff.
+    """
     _write_history_xml(tmp_path)
 
     docx_bytes = _zip_bytes({"[Content_Types].xml": b"<?xml version='1.0'?><Types/>"})
@@ -214,6 +231,232 @@ def test_scan_category_docx_extension_matched_case_insensitively(tmp_path):
     assert len(result.files) == 1
     assert result.files[0].status == "plaintext_passthrough"
     assert result.files[0].kind == "zip"
+
+
+def test_scan_category_ooxml_content_detected_despite_wrong_extension(tmp_path):
+    """Real bug found against the project owner's own 49GB backup: several
+    files had a .pdf extension but were actually PowerPoint/Word documents
+    (confirmed via ppt/presentation.xml or word/document.xml inside).
+    Extension-based matching can't catch this since the extension lies;
+    content-based detection (a root-level "[Content_Types].xml" entry)
+    must catch it regardless of the misleading name.
+    """
+    _write_history_xml(tmp_path)
+
+    pptx_bytes = _zip_bytes(
+        {
+            "[Content_Types].xml": b"<?xml version='1.0'?><Types/>",
+            "ppt/presentation.xml": b"<?xml version='1.0'?><p:presentation/>",
+        }
+    )
+
+    (tmp_path / "CATEGORY_MISLABELED").mkdir()
+    (tmp_path / "CATEGORY_MISLABELED" / "not_actually_a.pdf").write_bytes(pptx_bytes)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "CATEGORY_MISLABELED", KEY, out_dir)
+
+    out_path = out_dir / "CATEGORY_MISLABELED" / "not_actually_a.pdf"
+    assert out_path.is_file(), (
+        "mislabeled .pdf (actually pptx content) must be preserved as a single file"
+    )
+    assert out_path.read_bytes() == pptx_bytes
+    assert len(result.files) == 1
+    assert result.files[0].status == "plaintext_passthrough"
+    assert result.files[0].kind == "zip"
+
+
+def test_scan_category_odf_content_detected_via_mimetype(tmp_path):
+    """Content-based ODF detection: a root-level "mimetype" entry whose
+    bytes start with "application/vnd.oasis.opendocument." marks this as
+    an OpenDocument file, which must be preserved as a single file.
+    """
+    _write_history_xml(tmp_path)
+
+    odf_bytes = _zip_bytes(
+        {
+            "mimetype": b"application/vnd.oasis.opendocument.text",
+            "content.xml": b"<?xml version='1.0'?><office:document-content/>",
+        }
+    )
+    (tmp_path / "CATEGORY_ODF").mkdir()
+    (tmp_path / "CATEGORY_ODF" / "notes.odt").write_bytes(odf_bytes)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "CATEGORY_ODF", KEY, out_dir)
+
+    out_path = out_dir / "CATEGORY_ODF" / "notes.odt"
+    assert out_path.is_file()
+    assert out_path.read_bytes() == odf_bytes
+    assert len(result.files) == 1
+    assert result.files[0].status == "plaintext_passthrough"
+    assert result.files[0].kind == "zip"
+
+
+def test_scan_category_epub_content_detected_via_mimetype(tmp_path):
+    """Content-based EPUB detection: a root-level "mimetype" entry whose
+    bytes are exactly "application/epub+zip" marks this as an EPUB, which
+    must be preserved as a single file.
+    """
+    _write_history_xml(tmp_path)
+
+    epub_bytes = _zip_bytes(
+        {
+            "mimetype": b"application/epub+zip",
+            "META-INF/container.xml": b"<?xml version='1.0'?><container/>",
+        }
+    )
+    (tmp_path / "CATEGORY_EPUB").mkdir()
+    (tmp_path / "CATEGORY_EPUB" / "book.epub").write_bytes(epub_bytes)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "CATEGORY_EPUB", KEY, out_dir)
+
+    out_path = out_dir / "CATEGORY_EPUB" / "book.epub"
+    assert out_path.is_file()
+    assert out_path.read_bytes() == epub_bytes
+    assert len(result.files) == 1
+    assert result.files[0].status == "plaintext_passthrough"
+    assert result.files[0].kind == "zip"
+
+
+def test_scan_category_generic_zip_not_recursed_regardless_of_surrounding_structure(tmp_path):
+    """The catalog-based default doesn't care about the surrounding
+    category's shape at all (an earlier design considered a "category is
+    flat vs has subdirectories" structural signal, but that was dropped as
+    too fragile - see KNOWN_SMART_SWITCH_CONTAINERS's docstring). This
+    models a literal user .zip file (not catalogued, not a recognized
+    document by content) sitting next to an unrelated real subfolder, e.g.
+    the EtcFolder/EtcFile shape found in the real backup, and confirms the
+    same "preserve, don't recurse" default applies there too.
+    """
+    _write_history_xml(tmp_path)
+
+    category_dir = tmp_path / "EtcFolder_LIKE"
+    category_dir.mkdir()
+    (category_dir / "some_subdir").mkdir()
+    (category_dir / "some_subdir" / "other.txt").write_bytes(
+        encrypt_iv_prefixed(b"unrelated file inside a real subfolder", KEY)
+    )
+    generic_zip = _zip_bytes({"readme.txt": b"just a plain zip, not a document"})
+    (category_dir / "myarchive.zip").write_bytes(generic_zip)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "EtcFolder_LIKE", KEY, out_dir)
+
+    zip_out_path = out_dir / "EtcFolder_LIKE" / "myarchive.zip"
+    assert zip_out_path.is_file(), (
+        "non-catalogued generic zip must be preserved as a single file"
+    )
+    assert zip_out_path.read_bytes() == generic_zip
+
+    matching = [f for f in result.files if f.relative_path == "myarchive.zip"]
+    assert len(matching) == 1
+    assert matching[0].status == "plaintext_passthrough"
+    assert matching[0].kind == "zip"
+
+
+def test_scan_category_apk_never_recursed_even_in_flat_category(tmp_path):
+    """.apk (and .jar) files must never be unpacked, regardless of category
+    shape - this is an explicit backstop independent of the structural
+    rule, even in a flat category where the structural rule alone would
+    otherwise say "recurse".
+    """
+    _write_history_xml(tmp_path)
+
+    apk_bytes = _zip_bytes({"AndroidManifest.xml": b"fake manifest bytes"})
+    (tmp_path / "CATEGORY_APK").mkdir()
+    (tmp_path / "CATEGORY_APK" / "someapp.apk").write_bytes(apk_bytes)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "CATEGORY_APK", KEY, out_dir)
+
+    apk_out_path = out_dir / "CATEGORY_APK" / "someapp.apk"
+    assert apk_out_path.is_file(), (
+        "apk must be preserved as a single file even in a flat category"
+    )
+    assert apk_out_path.read_bytes() == apk_bytes
+    assert len(result.files) == 1
+    assert result.files[0].status == "plaintext_passthrough"
+
+
+def test_scan_category_known_container_chain_recursed_end_to_end(tmp_path):
+    """Regression-guards real Notes recovery, the project's single most
+    important already-validated real-world case: sdoc.snmm and sdoc.bk are
+    both exact-name entries in KNOWN_SMART_SWITCH_CONTAINERS, so the
+    two-layer encrypted chain (sdoc.snmm -> decrypts to a zip containing
+    sdoc.bk -> decrypts to a zip containing the real note content) must
+    keep being opened all the way down, exactly as before.
+
+    (An earlier design considered here made this decision from a one-time
+    "is this category flat" structural flag computed once per category and
+    threaded through recursion - that approach was reconsidered as too
+    fragile and replaced by this small, explicit, hand-verified catalog.
+    Since KNOWN_SMART_SWITCH_CONTAINERS is a stateless per-name lookup with
+    no flag to thread or accidentally re-derive, the "does the decision
+    survive intermediate recursion output" concern that motivated the old
+    design no longer applies here by construction.)
+
+    This also documents a real, deliberate behavior change at the next
+    level down: b_1.sdocx (one of Notes' individual per-note attachment
+    packages) is NOT in the catalog and contains no
+    "[Content_Types].xml"/"mimetype" of its own, so under the new
+    conservative default it is preserved as a single opaque file rather
+    than recursed into - catalog membership is evaluated per-name at each
+    level, it is not inherited from an ancestor being a known container.
+    """
+    _write_history_xml(tmp_path)
+
+    final_content = b"%PDF-1.4 fake pdf bytes for final note attachment"
+    b1_sdocx_zip = _zip_bytes({"media/final.pdf": final_content})
+
+    marker_content = b"restore db marker, not related to note content"
+
+    # inner_zip is what sdoc.bk decrypts to: a loose plaintext file
+    # (SmartSwitchRestoreDB/marker.txt) alongside a per-note package
+    # (b_1.sdocx) that is itself zip-shaped but NOT catalogued.
+    inner_zip = _zip_bytes(
+        {
+            "SmartSwitchRestoreDB/marker.txt": marker_content,
+            "b_1.sdocx": b1_sdocx_zip,
+        }
+    )
+    sdoc_bk_encrypted = encrypt_iv_prefixed(inner_zip, KEY)
+
+    snmm_zip = _zip_bytes({"sdoc.bk": sdoc_bk_encrypted})
+    sdoc_snmm_encrypted = encrypt_iv_prefixed(snmm_zip, KEY)
+
+    category_dir = tmp_path / "SAMSUNGNOTE_LIKE"
+    category_dir.mkdir()
+    (category_dir / "sdoc.snmm").write_bytes(sdoc_snmm_encrypted)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "SAMSUNGNOTE_LIKE", KEY, out_dir)
+
+    assert result.counts()["error"] == 0, f"expected no errors, got {result.files}"
+
+    # sdoc.snmm -> sdoc.bk chain opened correctly: the loose entry inside
+    # sdoc.bk was reached and extracted.
+    marker_out = (
+        out_dir / "SAMSUNGNOTE_LIKE" / "sdoc.snmm" / "sdoc.bk"
+        / "SmartSwitchRestoreDB" / "marker.txt"
+    )
+    assert marker_out.is_file()
+    assert marker_out.read_bytes() == marker_content
+
+    # b_1.sdocx is NOT catalogued and not a recognized document by
+    # content, so under the conservative default it must be preserved
+    # whole - not exploded - even though it sits right next to content
+    # that DID get opened, and even though the note media inside it
+    # (media/final.pdf) is never separately extracted as a result.
+    b1_out = (
+        out_dir / "SAMSUNGNOTE_LIKE" / "sdoc.snmm" / "sdoc.bk" / "b_1.sdocx"
+    )
+    assert b1_out.is_file(), (
+        "b_1.sdocx is not in KNOWN_SMART_SWITCH_CONTAINERS, so it must be "
+        "preserved as a single opaque file rather than recursed into"
+    )
+    assert b1_out.read_bytes() == b1_sdocx_zip
 
 
 def test_scan_category_undecodable_file(tmp_path):
@@ -303,12 +546,14 @@ def test_scan_category_recurses_into_subdirectories(tmp_path):
 
 def test_scan_category_zip_slip_dotdot_sanitized(tmp_path):
     """Finding 2: a zip entry named with '../' segments must never escape
-    out_dir when its path is built.
+    out_dir when its path is built. Named CALLLOG.zip (a known Smart
+    Switch container) so this actually gets recursed into under the
+    catalog-based recursion policy.
     """
     _write_history_xml(tmp_path)
     malicious_zip = _zip_bytes({"../../../PWNED.txt": b"pwned content"})
     (tmp_path / "CATEGORY_E").mkdir()
-    (tmp_path / "CATEGORY_E" / "wrapper.zip").write_bytes(malicious_zip)
+    (tmp_path / "CATEGORY_E" / "CALLLOG.zip").write_bytes(malicious_zip)
 
     out_dir = tmp_path / "out"
     result = scan_category(tmp_path, "CATEGORY_E", KEY, out_dir)
@@ -328,16 +573,18 @@ def test_scan_category_zip_slip_backslash_sanitized(tmp_path):
     """Zip entry names should be '/'-separated per spec, but a hostile or
     Windows-built zip might use backslashes; those must be normalized and
     sanitized too, not treated as a literal (and harmless-looking, but
-    still wrong) filename component.
+    still wrong) filename component. Named CALLLOG.zip (a known Smart
+    Switch container) so this actually gets recursed into under the
+    catalog-based recursion policy.
     """
     _write_history_xml(tmp_path)
-    # 3 "up" segments: entry lives at out_dir/CATEGORY_H/wrapper.zip/<entry>,
+    # 3 "up" segments: entry lives at out_dir/CATEGORY_H/CALLLOG.zip/<entry>,
     # so 3 ".." would reach tmp_path (one level above out_dir) if the
     # backslashes were not normalized/sanitized - a genuine escape, not a
     # coincidental match of directory depth.
     malicious_zip = _zip_bytes({"..\\..\\..\\evil.txt": b"evil content"})
     (tmp_path / "CATEGORY_H").mkdir()
-    (tmp_path / "CATEGORY_H" / "wrapper.zip").write_bytes(malicious_zip)
+    (tmp_path / "CATEGORY_H" / "CALLLOG.zip").write_bytes(malicious_zip)
 
     out_dir = tmp_path / "out"
     scan_category(tmp_path, "CATEGORY_H", KEY, out_dir)
@@ -434,19 +681,22 @@ def test_scan_category_zip_construction_notimplementederror_single_result_and_fa
     NotImplementedError at construction time. That must be treated the
     same as any other corrupt/unsupported zip: exactly one FileResult, and
     the original bytes written as a fallback rather than silently lost.
+    Named CALLLOG.zip (a known Smart Switch container) so recursion is
+    actually attempted under the catalog-based recursion policy - this
+    corrupt-zip handling only runs once recursion is attempted at all.
     """
     _write_history_xml(tmp_path)
     corrupt = _zip_bytes_with_mangled_version_needed()
     (tmp_path / "CATEGORY_J").mkdir()
-    (tmp_path / "CATEGORY_J" / "badversion.zip").write_bytes(corrupt)
+    (tmp_path / "CATEGORY_J" / "CALLLOG.zip").write_bytes(corrupt)
 
     out_dir = tmp_path / "out"
     result = scan_category(tmp_path, "CATEGORY_J", KEY, out_dir)
 
-    matching = [f for f in result.files if f.relative_path == "badversion.zip"]
+    matching = [f for f in result.files if f.relative_path == "CALLLOG.zip"]
     assert len(matching) == 1, f"expected exactly one FileResult, got {matching}"
     assert matching[0].status == "error"
-    written = out_dir / "CATEGORY_J" / "badversion.zip"
+    written = out_dir / "CATEGORY_J" / "CALLLOG.zip"
     assert written.exists(), "original bytes must be written, not discarded"
     assert written.read_bytes() == corrupt
 
@@ -458,22 +708,24 @@ def test_scan_category_zip_entry_unsupported_compression_container_fallback(tmp_
     isolates as its own 'error' FileResult - but since that's the zip's
     only entry, nothing at all ends up written for the container's own
     path, so the container must not still be reported as a success
-    ('plaintext_passthrough') with nothing on disk to show for it.
+    ('plaintext_passthrough') with nothing on disk to show for it. Named
+    CALLLOG.zip (a known Smart Switch container) so recursion is actually
+    attempted under the catalog-based recursion policy.
     """
     _write_history_xml(tmp_path)
     corrupt = _zip_bytes_with_unsupported_compression()
     (tmp_path / "CATEGORY_K").mkdir()
-    (tmp_path / "CATEGORY_K" / "onlyentry.zip").write_bytes(corrupt)
+    (tmp_path / "CATEGORY_K" / "CALLLOG.zip").write_bytes(corrupt)
 
     out_dir = tmp_path / "out"
     result = scan_category(tmp_path, "CATEGORY_K", KEY, out_dir)
 
-    matching = [f for f in result.files if f.relative_path == "onlyentry.zip"]
+    matching = [f for f in result.files if f.relative_path == "CALLLOG.zip"]
     assert len(matching) == 1, (
         f"expected exactly one FileResult for the container path, got {matching}"
     )
     assert matching[0].status == "error"
-    written = out_dir / "CATEGORY_K" / "onlyentry.zip"
+    written = out_dir / "CATEGORY_K" / "CALLLOG.zip"
     assert written.exists(), (
         "container bytes must be written when nothing inside the zip could be extracted"
     )
@@ -483,19 +735,23 @@ def test_scan_category_zip_entry_unsupported_compression_container_fallback(tmp_
 def test_scan_category_corrupt_raw_zip_single_result_and_fallback_write(tmp_path):
     """Finding 4, scenario 1: a raw file has zip magic bytes but a corrupt
     body. Exactly one FileResult must be recorded for it, and its bytes
-    must be written somewhere rather than silently lost.
+    must be written somewhere rather than silently lost. Named CALLLOG.zip
+    (a known Smart Switch container) so recursion is actually attempted
+    under the catalog-based recursion policy - without that, this
+    filename wouldn't be recursed into at all any more, and this test
+    would stop exercising the corrupt-zip fallback path it's named for.
     """
     _write_history_xml(tmp_path)
     corrupt = _truncated_zip_bytes()
     (tmp_path / "CATEGORY_F").mkdir()
-    (tmp_path / "CATEGORY_F" / "broken.zip").write_bytes(corrupt)
+    (tmp_path / "CATEGORY_F" / "CALLLOG.zip").write_bytes(corrupt)
 
     out_dir = tmp_path / "out"
     result = scan_category(tmp_path, "CATEGORY_F", KEY, out_dir)
 
-    matching = [f for f in result.files if f.relative_path == "broken.zip"]
+    matching = [f for f in result.files if f.relative_path == "CALLLOG.zip"]
     assert len(matching) == 1, f"expected exactly one FileResult, got {matching}"
-    written = out_dir / "CATEGORY_F" / "broken.zip"
+    written = out_dir / "CATEGORY_F" / "CALLLOG.zip"
     assert written.exists(), "corrupt zip's original bytes must be written, not discarded"
     assert written.read_bytes() == corrupt
 
