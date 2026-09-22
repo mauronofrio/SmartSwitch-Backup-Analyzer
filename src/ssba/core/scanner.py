@@ -271,21 +271,48 @@ def _is_recognized_mimetype_entry(zf: zipfile.ZipFile) -> bool:
     _MIMETYPE_PEEK_LIMIT), so there's no legitimate reason to ever need
     more than that many bytes.
 
-    Two layers of bounding, both against _MIMETYPE_PEEK_LIMIT:
+    Three layers of bounding:
     1. A cheap check of the entry's declared (central-directory)
-       file_size, to reject an obviously-oversized entry without opening
-       it at all.
-    2. Even if that declared size were somehow wrong, the actual read
-       goes through zf.open("mimetype").read(N) rather than zf.read(...):
+       file_size against _MIMETYPE_PEEK_LIMIT, to reject an
+       obviously-oversized entry without opening it at all.
+    2. A check of the entry's declared compress_type: only ZIP_STORED and
+       ZIP_DEFLATED are read at all; anything else is rejected outright
+       (see below for why).
+    3. For those two accepted methods, the actual read goes through
+       zf.open("mimetype").read(N) rather than zf.read(...):
        ZipExtFile.read(n) decompresses incrementally and stops once n
        bytes have been produced, regardless of what the entry's header
-       claims - so this stays bounded independent of the size check.
+       claims - so this stays bounded independent of what the declared
+       size says, FOR THESE TWO METHODS.
+
+    Layer 2 exists because layer 3's "bounded independent of declared
+    size" guarantee does NOT hold for every compression method CPython's
+    zipfile supports: ZipExtFile._read1's bounded-decompression path only
+    applies to the DEFLATE branch. For BZIP2- or LZMA-compressed entries,
+    zipfile decompresses the entry FULLY internally and only truncates
+    the result afterwards - so a forged declared file_size paired with
+    BZIP2/LZMA compression bypasses layer 1 (small declared size) while
+    still fully decompressing a large payload before layer 3's .read(N)
+    ever gets to truncate it (independently measured: a lying-size bzip2
+    entry reached ~437MB peak, lzma ~64MB, despite this function's own
+    read cap). Real Smart Switch data never uses these methods, but since
+    the docstring here previously (incorrectly) claimed the bound was
+    "independent of declared size" unconditionally, that's tightened to
+    only cover ZIP_STORED/ZIP_DEFLATED - anything else is rejected before
+    any read is attempted, matching the "not a recognized document"
+    outcome for content this function isn't prepared to safely inspect.
     """
     try:
         info = zf.getinfo("mimetype")
     except KeyError:
         return False
     if info.file_size > _MIMETYPE_PEEK_LIMIT:
+        return False
+    if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+        # Only these two methods are safe to read via a bounded
+        # ZipExtFile.read(N) - see the docstring above. A real ODF/EPUB
+        # mimetype entry is always ZIP_STORED per spec anyway, so this
+        # never rejects legitimate content.
         return False
     try:
         with zf.open("mimetype") as fh:

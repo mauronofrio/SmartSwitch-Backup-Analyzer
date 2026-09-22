@@ -654,6 +654,85 @@ def test_is_zip_shaped_document_rejects_oversized_mimetype_entry_without_reading
     )
 
 
+def _zip_bytes_with_bzip2_mimetype_and_lying_size(
+    real_content: bytes, declared_size: int
+) -> bytes:
+    """Build a zip whose "mimetype" entry is BZIP2-compressed and whose
+    declared (central-directory) uncompressed size lies: it claims
+    `declared_size` bytes while the entry's real decompressed content is
+    actually `len(real_content)` bytes.
+
+    Used to prove that the "mimetype" peek's compress_type gate - not
+    just its declared-size check - is what rejects non-DEFLATE/STORED
+    entries: with a lying (small, in-bounds) declared size, the
+    declared-size check alone would let this entry through, so only the
+    compress_type check can be what stops it from being read.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_BZIP2) as zf:
+        zf.writestr("mimetype", real_content)
+    data = bytearray(buf.getvalue())
+
+    cd_sig_offset = data.find(b"PK\x01\x02")
+    assert cd_sig_offset != -1
+    # Central directory file header: compression method at offset +10,
+    # uncompressed size at offset +24 (both relative to the signature).
+    assert data[cd_sig_offset + 10 : cd_sig_offset + 12] == struct.pack(
+        "<H", zipfile.ZIP_BZIP2
+    )
+    data[cd_sig_offset + 24 : cd_sig_offset + 28] = struct.pack("<I", declared_size)
+    return bytes(data)
+
+
+def test_is_zip_shaped_document_rejects_bzip2_mimetype_entry_with_lying_size(monkeypatch):
+    """Follow-up to the DEFLATE bomb test above: the declared-size check
+    plus a bounded zf.open().read(N) is NOT actually bounded "independent
+    of declared size" for every compression method CPython's zipfile
+    supports. ZipExtFile's bounded-decompression path only applies to the
+    DEFLATE branch - for BZIP2/LZMA-compressed entries, zipfile
+    decompresses the entry FULLY internally before truncating the result,
+    so a forged declared size paired with BZIP2/LZMA compression could
+    still force a large decompression even with a read cap in place
+    (independently measured: a lying-size bzip2 entry reached ~437MB
+    peak, lzma ~64MB, despite the .read(N) cap). The fix adds an explicit
+    compress_type gate: only ZIP_STORED/ZIP_DEFLATED are ever opened/read
+    at all; anything else (including BZIP2) is rejected outright.
+
+    Builds a real BZIP2-compressed "mimetype" entry with moderately
+    oversized (not maximally extreme) real content, whose declared
+    central-directory size is forged down to a small, in-bounds value -
+    so the declared-size check alone would NOT reject it. Proves the
+    rejection the same structural way as the DEFLATE bomb test: records
+    whether zipfile.ZipFile.open() is ever invoked for the "mimetype"
+    entry, rather than asserting on timing.
+    """
+    from ssba.core.scanner import _is_zip_shaped_document
+
+    real_content = b"B" * (2 * 1024 * 1024)  # 2MB, moderately oversized
+    data = _zip_bytes_with_bzip2_mimetype_and_lying_size(real_content, declared_size=10)
+
+    opened_mimetype_entries: list[bool] = []
+    original_open = zipfile.ZipFile.open
+
+    def tracking_open(self, name, *args, **kwargs):
+        entry_name = getattr(name, "filename", name)
+        if entry_name == "mimetype":
+            opened_mimetype_entries.append(True)
+        return original_open(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", tracking_open)
+
+    result = _is_zip_shaped_document(data)
+
+    assert result is False
+    assert opened_mimetype_entries == [], (
+        "a BZIP2-compressed mimetype entry must be rejected via its "
+        "compress_type before ever being opened/decompressed at all, "
+        "even with a lying declared size that passes the size check - "
+        f"got {len(opened_mimetype_entries)} open() call(s)"
+    )
+
+
 def test_scan_category_undecodable_file(tmp_path):
     _build_fake_backup(tmp_path)
     out_dir = tmp_path / "out"
