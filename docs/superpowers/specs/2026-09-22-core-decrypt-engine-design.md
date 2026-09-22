@@ -61,7 +61,21 @@ turns into reusable code:
 
 - Understanding/parsing what any category's decrypted data *means* (that's
   category parsers, later phases).
-- Support for password/PIN-protected backups.
+- Support for password/PIN-protected backups. **Known gap, recorded after
+  the final review (not silently dropped):** the "detect and report
+  'unsupported (password-protected backup)'" behavior described above under
+  Background item 7 is *not implemented* in this phase. Today, scanning a
+  password-protected backup with this tool produces a report full of
+  `"undecoded"` entries (the encrypted files just don't decrypt with the
+  no-password key derivation) but likely still exits 0, because unencrypted
+  wrapper zips and other already-plaintext files still count as
+  `plaintext_passthrough` "success" — there is currently no positive
+  detection of "this whole backup uses a scheme we don't support" as
+  distinct from "some individual files didn't decrypt." Implementing real
+  detection needs its own design pass (how to distinguish a systematically
+  wrong key from a few odd/corrupt files without false-positiving on normal
+  `undecoded` categories) and is deferred to Phase 2, not attempted as a
+  quick heuristic here.
 - A GUI (explicitly deferred by the project owner to a later phase, after
   the CLI and at least a few category parsers exist).
 - Modifying or writing anything back into a Smart Switch backup — this is
@@ -83,11 +97,21 @@ src/ssba/
     └── main.py          # thin CLI wrapping core/
 ```
 
-- `core/` has no side effects beyond what's explicitly passed in: functions
-  take bytes/paths in, return bytes/data structures out. No printing, no
-  implicit file writes. This is what lets a future GUI call `core/` directly.
-- `cli/` is the only layer that talks to stdout/stderr and decides where to
-  write output files.
+- `core/` never prints or writes to stdout/stderr — only `cli/` does that.
+  **Correction (post-implementation, recorded after the final review found
+  the original wording below didn't match what got built):** `core/scanner.py`
+  *does* write decrypted/passthrough file content to disk, under the
+  `out_dir` its caller passes in — decrypted category data can run into the
+  tens of GB for a real backup, so buffering it all in memory to return as
+  data structures and let `cli/` write it isn't viable. What `core/` still
+  never does is *decide* where output goes beyond the `out_dir` it's given,
+  or talk to stdout/stderr. A pure, no-I/O `core/` (e.g. via an injectable
+  write-sink callback) is deferred to whenever Phase 2 actually needs to
+  call `scan_backup` from a GUI or in-memory context without materializing
+  files — not needed yet, since nothing does that today.
+- `cli/` is the only layer that talks to stdout/stderr and decides *which*
+  output directory is used (it still owns that decision — it's just that
+  `core/scanner.py` is who does the actual writing into it).
 - Category-specific interpretation (Phase 2+) will live under
   `core/parsers/<category>.py`, each consuming the *already-decrypted* bytes
   `core/scanner.py` produces — parsers never touch crypto directly.
@@ -125,7 +149,13 @@ src/ssba/
   top-level subfolder of the backup root (Phase 1 doesn't need to know what
   they mean).
 - `scan_category(backup_root: Path, category: str, key: bytes) -> CategoryResult`
-  - For each file directly under the category folder:
+  - For each file under the category folder, **recursively** (some real
+    categories — e.g. `Photo`, `Video`, `Docs` — store their content in
+    subdirectories, not directly in the category folder; a "top-level files
+    only" reading of this spec was implemented first and found, by the
+    final review against a real 49GB backup, to silently skip 17,641 real
+    files including 13,127 photos — corrected to recursive before Phase 1
+    was considered done):
     - If it's a valid ZIP already (unencrypted outer wrapper, e.g.
       `Contact.spbm`, `CALLLOG.zip`): open it, recurse into its entries
       (files that themselves decrypt successfully, or are already
