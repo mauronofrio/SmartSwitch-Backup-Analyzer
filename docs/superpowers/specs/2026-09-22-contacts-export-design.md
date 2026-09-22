@@ -143,10 +143,20 @@ never prints and only writes to paths its caller passes in.
 5. **Synthesize `FN` if missing**, using the first non-empty of:
    `N` (prefix, given, additional, family, suffix joined by single spaces) →
    first `ORG` component → first `EMAIL` → first `TEL` → `"Unknown"`.
-6. **Set `VERSION` to `3.0`.** Everything else (`TEL`, `EMAIL`, `PHOTO`,
+6. **Convert vCard 2.1 parameters to 3.0 form, on every property.**
+   (Added during planning: prototyping showed `vobject` does *not* do this on
+   its own — it re-emits `TEL;CELL;PREF` in 2.1 style and crashes serializing
+   a 2.1 `PHOTO;ENCODING=BASE64` photo.)
+   - bare 2.1 parameters (`CELL`, `WORK`, `PREF`, `JPEG`, ...) become `TYPE`
+     values, in order, without duplicates (`TEL;CELL;PREF` →
+     `TEL;TYPE=CELL,PREF`);
+   - `ENCODING=BASE64` becomes `ENCODING=b`;
+   - `CHARSET` parameters are dropped (vCard 3.0 is UTF-8).
+7. **Set `VERSION` to `3.0`.** Everything else (`TEL`, `EMAIL`, `PHOTO`,
    `BDAY`, `NOTE`, `TITLE`, `X-*`) is kept as `vobject` parsed it and is
    re-serialized by `vobject` as vCard 3.0 (UTF-8, no quoted-printable,
-   photo as base64).
+   photo as base64). Prototype check: all 798 real cards serialize and
+   re-parse, each with `VERSION:3.0` and an `FN`.
 
 ## CLI
 
