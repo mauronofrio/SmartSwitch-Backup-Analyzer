@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import quopri
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,19 +36,167 @@ class ContactExportResult:
     unparsed_path: Path | None = None
 
 
-def _sanitize(card: str) -> str:
+# Only CR/LF end a line: str.splitlines() would also split on U+2028, U+0085,
+# \x0b and \x0c, which can legitimately appear inside UTF-8 values.
+_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
+# Properties whose value is a ';'-separated list of components (Android writes
+# X-ANDROID-CUSTOM as "<mimetype>;<column 1>;<column 2>;...").
+_STRUCTURED = {"N", "ADR", "ORG", "X-ANDROID-CUSTOM"}
+# Properties whose value is a ','-separated list, which vobject keeps as a list.
+_LISTS = {"CATEGORIES"}
+# Most components vobject keeps for N and ADR; more would be dropped silently.
+_MAX_COMPONENTS = {"N": 5, "ADR": 7}
+# Values vobject passes through without unescaping: never escape them.
+_VERBATIM = {"BEGIN", "END", "VERSION", "GEO"}
+# Backslash escapes decoded in plain (not quoted-printable) vCard 2.1 values: the
+# ones Android's own 2.1 parser unescapes, plus \n, which its writer emits for
+# newlines. Any other backslash is a literal character.
+_V21_ESCAPES = {"\\": "\\", ";": ";", ",": ",", ":": ":", "n": "\n", "N": "\n"}
+_TRANSFER_PARAMS = {
+    "QUOTED-PRINTABLE", "ENCODING=QUOTED-PRINTABLE",
+    "8BIT", "ENCODING=8BIT", "7BIT", "ENCODING=7BIT",
+}
+
+
+def _split_line(line: str) -> tuple[str, list[str], str]:
     # Samsung writes headers like "PHOTO;ENCODING=BASE64;PREF;JPEG; :" and
-    # "BDAY;;:--12-25"; vobject rejects the empty parameters.
-    out = []
-    for line in card.splitlines():
-        if line[:1] in (" ", "\t") or ":" not in line:
-            out.append(line)
+    # "BDAY;;:--12-25"; vobject rejects the empty parameters, so drop them.
+    header, value = line.split(":", 1)
+    name, *params = header.split(";")
+    return name, [p for p in params if p.strip()], value
+
+
+def _norm_param(param: str) -> str:
+    return param.replace(" ", "").upper()
+
+
+def _is_quoted_printable(params: list[str]) -> bool:
+    return any(_norm_param(p) in ("QUOTED-PRINTABLE", "ENCODING=QUOTED-PRINTABLE") for p in params)
+
+
+def _is_base64(params: list[str]) -> bool:
+    return any(_norm_param(p) in ("BASE64", "ENCODING=BASE64", "ENCODING=B") for p in params)
+
+
+def _charset(params: list[str]) -> str:
+    for param in params:
+        key, _, value = param.partition("=")
+        if key.strip().upper() == "CHARSET" and value.strip().strip('"'):
+            return value.strip().strip('"')
+    return "utf-8"
+
+
+def _logical_lines(card: str) -> list[list[str]]:
+    """Group the raw lines of ``card`` into properties.
+
+    A line continues the previous property if it starts with a space or tab
+    (RFC folding), or if the previous property is quoted-printable and its last
+    line ends with ``=`` (a soft line break; Android puts no space after it).
+    """
+    groups: list[list[str]] = []
+    for line in _LINE_BREAK_RE.split(card):
+        if groups and _continues(groups[-1], line):
+            groups[-1].append(line)
+        else:
+            groups.append([line])
+    return groups
+
+
+def _continues(group: list[str], line: str) -> bool:
+    if line[:1] in (" ", "\t"):
+        return True
+    first = group[0]
+    if ":" not in first:
+        return False
+    _, params, value = _split_line(first)
+    last = value if len(group) == 1 else group[-1]
+    return last.endswith("=") and _is_quoted_printable(params)
+
+
+def _unfold(value: str, continuations: list[str], quoted_printable: bool) -> str:
+    for line in continuations:
+        if quoted_printable and value.endswith("="):
+            value = value[:-1] + line  # soft line break: "=" + CRLF vanish
+        else:
+            value += line[1:]  # RFC folding: CRLF + one space/tab vanish
+    return value
+
+
+def _unescape_v21(value: str, separator: str | None) -> list[str]:
+    parts, current, i = [], [], 0
+    while i < len(value):
+        char = value[i]
+        if char == "\\" and i + 1 < len(value) and value[i + 1] in _V21_ESCAPES:
+            current.append(_V21_ESCAPES[value[i + 1]])
+            i += 2
             continue
-        header, value = line.split(":", 1)
-        name, *params = header.split(";")
-        params = [p for p in params if p.strip()]
+        if char == separator:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        i += 1
+    parts.append("".join(current))
+    return parts
+
+
+def _escape_v3(text: str) -> str:
+    text = text.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
+    return _LINE_BREAK_RE.sub(r"\\n", text)
+
+
+def _value_to_v3(prop: str, value: str, quoted_printable: bool, charset: str) -> str:
+    """Decode a vCard 2.1 value and re-encode it as vCard 3.0 text."""
+    separator = ";" if prop in _STRUCTURED else "," if prop in _LISTS else None
+    if quoted_printable:
+        # Android QP-encodes each component on its own, keeping ';' literal, and
+        # does not backslash-escape QP text.
+        parts = value.split(separator) if separator else [value]
+        parts = [quopri.decodestring(p.encode("utf-8")).decode(charset) for p in parts]
+    else:
+        parts = _unescape_v21(value, separator)
+    limit = _MAX_COMPONENTS.get(prop)
+    if limit:
+        while len(parts) > limit and parts[-1] == "":
+            parts.pop()
+        if len(parts) > limit:
+            raise ValueError(f"{prop} has more than {limit} components")
+    return (separator or "").join(_escape_v3(p) for p in parts)
+
+
+def _prepare(card: str) -> tuple[str, list[str]]:
+    """Turn a vCard 2.1 card into text vobject parses without losing any value.
+
+    Text values are unfolded, quoted-printable-decoded and escaped as vCard 3.0
+    text, so vobject cannot cut them at an unescaped comma. Binary values and
+    BEGIN/END/VERSION/GEO lines keep their raw lines. Returns the prepared text
+    and the vCard 3.0 value of every X-ANDROID-CUSTOM property, in order.
+    """
+    out: list[str] = []
+    custom: list[str] = []
+    for group in _logical_lines(card):
+        first = group[0]
+        if ":" not in first:
+            out.extend(group)  # blank or broken line: vobject decides
+            continue
+        name, params, value = _split_line(first)
+        prop = name.rsplit(".", 1)[-1].strip().upper()
+        if prop in _VERBATIM or _is_base64(params):
+            out.append(";".join([name, *params]) + ":" + value)
+            out.extend(group[1:])
+            continue
+        quoted_printable = _is_quoted_printable(params)
+        charset = _charset(params)
+        value = _unfold(value, group[1:], quoted_printable)
+        params = [
+            p for p in params
+            if _norm_param(p) not in _TRANSFER_PARAMS and not _norm_param(p).startswith("CHARSET=")
+        ]
+        value = _value_to_v3(prop, value, quoted_printable, charset)
+        if prop == "X-ANDROID-CUSTOM":
+            custom.append(value)
         out.append(";".join([name, *params]) + ":" + value)
-    return "\r\n".join(out)
+    return "\r\n".join(out), custom
 
 
 def _params_to_v3(line) -> None:
@@ -80,12 +229,24 @@ def _formatted_name(card) -> str:
     return "Unknown"
 
 
-def _normalize(card):
+def _normalize(card, custom: list[str]):
+    # vobject would re-escape X-ANDROID-CUSTOM's ';' column separators as text;
+    # write the prepared vCard 3.0 value as it is instead.
+    custom_lines = card.contents.get("x-android-custom", [])
+    if len(custom_lines) != len(custom):
+        raise ValueError("X-ANDROID-CUSTOM properties do not match")
+    for line, value in zip(custom_lines, custom):
+        line.value = value
+        line.encoded = True
+
     categories: list[str] = []
+    for line in card.contents.get("categories", []):
+        categories.extend(v for v in line.value if v not in categories)
     for group in card.contents.pop("group-member", []):
         if group.value not in categories:
             categories.append(group.value)
     if categories:
+        card.contents.pop("categories", None)
         card.add("categories").value = categories
 
     departments = card.contents.pop("department", [])
@@ -110,8 +271,9 @@ def _normalize(card):
 
 
 def _export_card(raw: str) -> str:
-    card = vobject.readOne(_sanitize(raw))
-    return _normalize(card).serialize()
+    prepared, custom = _prepare(raw)
+    card = vobject.readOne(prepared)
+    return _normalize(card, custom).serialize()
 
 
 def parse_cards(text: str) -> tuple[list[str], list[str]]:

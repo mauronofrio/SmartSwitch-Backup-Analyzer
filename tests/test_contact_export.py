@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import quopri
+import re
+
 import pytest
 import vobject
 
@@ -8,7 +11,13 @@ from ssba.core.parsers.contact import (
     export_contacts,
     find_contact_sources,
 )
-from tests.contact_fixtures import GOOGLE_NAME, GOOGLE_VCF, PHONE_NAME, build_scan_dir
+from tests.contact_fixtures import (
+    GOOGLE_NAME,
+    GOOGLE_VCF,
+    PHONE_NAME,
+    TRICKY_VCF,
+    build_scan_dir,
+)
 
 
 def test_find_sources_returns_vcf_files_profile_first(tmp_path):
@@ -160,3 +169,72 @@ def test_export_keeps_unparsed_cards_byte_for_byte(tmp_path):
 
     assert result.unparsed == 1
     assert result.unparsed_path.read_bytes() == (truncated + "\r\n").encode("utf-8")
+
+
+def _reference_values(card_text: str) -> list[tuple[str, list[str]]]:
+    """Independent reference decoder for the fixture cards: unfold RFC folding
+    and quoted-printable soft line breaks, split N/ORG on the literal ';'
+    component separator, then QP-decode. (The fixtures hold no backslash
+    escapes, so no escape handling is needed here.)"""
+    props: list[list[str]] = []
+    for line in re.split(r"\r\n|\r|\n", card_text):
+        last = props[-1] if props else None
+        if last and "QUOTED-PRINTABLE" in last[0].upper() and last[1].endswith("="):
+            last[1] = last[1][:-1] + line
+        elif last and line[:1] in (" ", "\t"):
+            last[1] += line[1:]
+        elif ":" in line:
+            props.append(line.split(":", 1))
+    values = []
+    for header, value in props:
+        name = header.split(";")[0].upper()
+        parts = value.split(";") if name in ("N", "ORG") else [value]
+        if "QUOTED-PRINTABLE" in header.upper():
+            parts = [quopri.decodestring(p.encode("ascii")).decode("utf-8") for p in parts]
+        values.append((name, parts))
+    return values
+
+
+def _exported_values(card) -> dict[str, list[str]]:
+    values: dict[str, list[str]] = {}
+    for name, lines in card.contents.items():
+        for line in lines:
+            value = line.value
+            if isinstance(value, vobject.vcard.Name):
+                items = [value.family, value.given, value.additional, value.prefix, value.suffix]
+            elif isinstance(value, list):
+                items = value
+            else:
+                items = [value]
+            values.setdefault(name.upper(), []).extend(items)
+    return values
+
+
+def test_every_decoded_source_value_appears_whole_in_the_export(tmp_path):
+    scan_dir = build_scan_dir(tmp_path / "scan", google=GOOGLE_VCF + TRICKY_VCF)
+    out = tmp_path / "contacts.vcf"
+
+    result = export_contacts(scan_dir, out)
+
+    assert result.unparsed == 0
+    exported = [_exported_values(c) for c in vobject.readComponents(out.read_text(encoding="utf-8"))]
+    sources = re.findall(r"BEGIN:VCARD.*?END:VCARD", GOOGLE_VCF + TRICKY_VCF, re.DOTALL)
+    google = exported[1:1 + len(sources)]  # the profile comes first
+    checked = 0
+    for source, values in zip(sources, google, strict=True):
+        for name, parts in _reference_values(source):
+            if name in ("BEGIN", "END", "VERSION"):
+                continue
+            value = parts[0]
+            if name in ("N", "ORG"):
+                expected = [(name, part) for part in parts if part]
+            elif name == "DEPARTMENT":
+                expected = [("ORG", value)]
+            elif name == "GROUP_MEMBER":
+                expected = [("CATEGORIES", value)]
+            else:
+                expected = [(name, value)]
+            for key, part in expected:
+                assert part in values.get(key, []), (key, part)
+                checked += 1
+    assert checked == 23  # every source value of the 4 Google cards was compared

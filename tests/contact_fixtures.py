@@ -44,7 +44,56 @@ PROFILE_VCF = (
     "END:VCARD\r\n"
 )
 
-GOOGLE_NAME = "@@someone@example.com@@com.google.vcf"
+
+def android_qp(text: str) -> str:
+    """Quoted-printable exactly as Android's vCard 2.1 writer emits it.
+
+    Every UTF-8 byte becomes ``=XX`` and a soft line break (``=`` + CRLF, with no
+    leading space on the next line) is inserted every 67 characters -- also right
+    at the end of a value that fills the line exactly.
+    """
+    out, count = [], 0
+    for byte in text.encode("utf-8"):
+        out.append(f"={byte:02X}")
+        count += 3
+        if count >= 67:
+            out.append("=\r\n")
+            count = 0
+    return "".join(out)
+
+
+QP = "CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE"
+
+# Cards whose values break a naive vCard 2.1 -> 3.0 conversion: unescaped commas,
+# semicolons inside quoted-printable text, soft line breaks, newlines, emoji.
+TRICKY_VCF = (
+    "BEGIN:VCARD\r\n"
+    "VERSION:2.1\r\n"
+    "N:Neri, Jr.;Carlo;;;\r\n"
+    "TEL;CELL:+39 333 000 0010\r\n"
+    "ORG:Acme, Inc.\r\n"
+    "DEPARTMENT:Sales, North\r\n"
+    "TITLE:CEO, founder\r\n"
+    "NOTE:hello, world\r\n"
+    "GROUP_MEMBER:Friends, Family\r\n"
+    "X-ANDROID-CUSTOM:vnd.android.cursor.item/nickname;Carletto, the Great;1;;;;;;;;;;;;;\r\n"
+    "X-FAVORITE:1\r\n"
+    "END:VCARD\r\n"
+    "BEGIN:VCARD\r\n"
+    "VERSION:2.1\r\n"
+    f"N;{QP}:{android_qp('Gialli, Sr.')};{android_qp('Élodie 💋')};;;\r\n"
+    f"ORG;{QP}:{android_qp('Società, Uno; Due')}\r\n"
+    f"TITLE;{QP}:{android_qp('Direttrice, capo; reparto')}\r\n"
+    f"NOTE;{QP}:"
+    + android_qp("Prima riga, con virgola; e punto e virgola\nseconda riga 😀 fine, davvero")
+    + "\r\n"
+    f"GROUP_MEMBER;{QP}:{android_qp('Colleghi, ufficio')}\r\n"
+    f"X-ANDROID-CUSTOM;{QP}:{android_qp('vnd.sec.cursor.item/emergency_info')};;"
+    f"{android_qp('via Roma 1, 00100 Roma, piano 3')};;;;;;;;;;;;;\r\n"
+    "END:VCARD\r\n"
+)
+
+GOOGLE_NAME ="@@someone@example.com@@com.google.vcf"
 PHONE_NAME = "@@vnd.sec.contact.phone@@vnd.sec.contact.phone.vcf"
 CONTAINER = "Contact.spbm/Contact.bk"
 
