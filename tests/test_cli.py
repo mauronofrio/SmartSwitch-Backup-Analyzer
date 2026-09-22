@@ -24,6 +24,14 @@ def _build_minimal_backup(backup_root):
     )
 
 
+def _build_multi_category_backup(backup_root):
+    _build_minimal_backup(backup_root)
+    (backup_root / "CONTACT").mkdir()
+    (backup_root / "CONTACT" / "data.bin").write_bytes(
+        encrypt_iv_prefixed(b'{"name": "fake contact"}', KEY)
+    )
+
+
 def test_run_scan_success(tmp_path, capsys):
     backup_root = tmp_path / "backup"
     out_dir = tmp_path / "out"
@@ -36,6 +44,58 @@ def test_run_scan_success(tmp_path, capsys):
     assert "NOTES:" in captured.out
     report = json.loads((out_dir / "report.json").read_text(encoding="utf-8"))
     assert report["categories"][0]["category"] == "NOTES"
+
+
+def test_run_scan_with_category_filter(tmp_path, capsys):
+    backup_root = tmp_path / "backup"
+    out_dir = tmp_path / "out"
+    _build_multi_category_backup(backup_root)
+
+    exit_code = run(
+        ["scan", str(backup_root), "--out", str(out_dir), "--category", "NOTES"]
+    )
+
+    assert exit_code == 0
+    report = json.loads((out_dir / "report.json").read_text(encoding="utf-8"))
+    categories = [c["category"] for c in report["categories"]]
+    assert categories == ["NOTES"]
+
+
+def test_run_scan_with_multiple_category_filters(tmp_path, capsys):
+    backup_root = tmp_path / "backup"
+    out_dir = tmp_path / "out"
+    _build_multi_category_backup(backup_root)
+
+    exit_code = run(
+        [
+            "scan",
+            str(backup_root),
+            "--out",
+            str(out_dir),
+            "--category",
+            "NOTES",
+            "--category",
+            "CONTACT",
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads((out_dir / "report.json").read_text(encoding="utf-8"))
+    categories = {c["category"] for c in report["categories"]}
+    assert categories == {"NOTES", "CONTACT"}
+
+
+def test_run_scan_without_category_filter_scans_all(tmp_path, capsys):
+    backup_root = tmp_path / "backup"
+    out_dir = tmp_path / "out"
+    _build_multi_category_backup(backup_root)
+
+    exit_code = run(["scan", str(backup_root), "--out", str(out_dir)])
+
+    assert exit_code == 0
+    report = json.loads((out_dir / "report.json").read_text(encoding="utf-8"))
+    categories = {c["category"] for c in report["categories"]}
+    assert categories == {"NOTES", "CONTACT"}
 
 
 def test_run_scan_missing_backup_history(tmp_path, capsys):

@@ -29,6 +29,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument(
         "--out", type=Path, required=True, help="output directory for decrypted data"
     )
+    scan_parser.add_argument(
+        "--category",
+        dest="categories",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help="only scan this category (repeatable); defaults to every category found",
+    )
 
     return parser
 
@@ -39,7 +47,7 @@ def run(argv: list[str] | None = None) -> int:
 
     if args.command == "scan":
         try:
-            report = scan_backup(args.backup_root, args.out)
+            report = scan_backup(args.backup_root, args.out, categories=args.categories)
         except UnsupportedBackupError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
