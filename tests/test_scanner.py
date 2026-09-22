@@ -93,6 +93,41 @@ def test_scan_category_undecodable_file(tmp_path):
     assert (out_dir / "CATEGORY_C" / "mystery.bin").read_bytes() == bytes(range(256)) * 4
 
 
+def test_scan_category_decrypt_to_zip(tmp_path):
+    """Test the real-world case: decrypt a file that decrypts to a zip,
+    then recursively extract and process entries inside (like Notes sdoc.bk).
+    """
+    _write_history_xml(tmp_path)
+
+    # Create a small zip with mixed content
+    inner_zip = _zip_bytes(
+        {
+            "nested.xml": b"<?xml version='1.0'?><doc/>",
+            "data.json": b'{"key": "value"}',
+        }
+    )
+    # Encrypt the zip bytes
+    encrypted_zip = encrypt_iv_prefixed(inner_zip, KEY)
+
+    (tmp_path / "CATEGORY_D").mkdir()
+    (tmp_path / "CATEGORY_D" / "sdoc.bk").write_bytes(encrypted_zip)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "CATEGORY_D", KEY, out_dir)
+    counts = result.counts()
+
+    # Should have: 1 decrypted (sdoc.bk itself, kind=zip) + 2 plaintext (nested entries)
+    # No errors!
+    assert counts["decrypted"] == 1, f"expected 1 decrypted, got {counts}"
+    assert counts["plaintext_passthrough"] == 2, f"expected 2 plaintext, got {counts}"
+    assert counts["error"] == 0, f"expected 0 errors, got {counts}"
+
+    # Verify the nested entries exist and are correctly extracted
+    assert (out_dir / "CATEGORY_D" / "sdoc.bk" / "nested.xml").exists()
+    assert (out_dir / "CATEGORY_D" / "sdoc.bk" / "data.json").exists()
+    assert b"doc" in (out_dir / "CATEGORY_D" / "sdoc.bk" / "nested.xml").read_bytes()
+
+
 def test_scan_backup_end_to_end(tmp_path):
     _build_fake_backup(tmp_path)
     out_dir = tmp_path / "out"

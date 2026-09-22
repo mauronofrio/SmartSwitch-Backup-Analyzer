@@ -113,7 +113,8 @@ def _process(
             )
             return
 
-        _write_output(out_dir / rel_path, blob.data)
+        if blob.kind != "zip":
+            _write_output(out_dir / rel_path, blob.data)
         results.append(FileResult(rel_path, "decrypted", kind=blob.kind))
         if blob.kind == "zip":
             _recurse_zip(blob.data, key, out_dir, rel_path + "/", results)
@@ -139,7 +140,17 @@ def _recurse_zip(
         for info in zf.infolist():
             if info.is_dir():
                 continue
-            raw = zf.read(info)
+            try:
+                raw = zf.read(info)
+            except Exception as exc:  # noqa: BLE001 - per-file isolation
+                results.append(
+                    FileResult(
+                        rel_prefix + info.filename,
+                        "error",
+                        detail=f"failed to read zip entry: {type(exc).__name__}: {exc}",
+                    )
+                )
+                continue
             _process(info.filename, raw, key, out_dir, rel_prefix, results)
 
 
