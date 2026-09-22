@@ -9,7 +9,10 @@ from pathlib import Path
 
 import vobject
 
-_CARD_RE = re.compile(r"BEGIN:VCARD.*?END:VCARD", re.DOTALL)
+# A card runs from BEGIN:VCARD to the first END:VCARD with no other BEGIN:VCARD
+# in between, so a truncated card cannot swallow the card after it.
+_CARD_RE = re.compile(r"BEGIN:VCARD(?:(?!BEGIN:VCARD).)*?END:VCARD", re.DOTALL | re.IGNORECASE)
+_BEGIN_RE = re.compile(r"BEGIN:VCARD", re.IGNORECASE)
 _EXPORTABLE_STATUSES = {"decrypted", "plaintext_passthrough"}
 
 
@@ -100,24 +103,42 @@ def _normalize(card):
     for lines in card.contents.values():
         for line in lines:
             _params_to_v3(line)
-    card.version.value = "3.0"
+    if "version" in card.contents:
+        card.version.value = "3.0"
+    # Otherwise vobject adds VERSION:3.0 itself when serializing.
     return card
 
 
-def parse_cards(text: str) -> tuple[list, list[str]]:
-    """Parse every vCard in ``text`` independently.
+def _export_card(raw: str) -> str:
+    card = vobject.readOne(_sanitize(raw))
+    return _normalize(card).serialize()
 
-    Returns the normalized vCard 3.0 components and the raw text of every card
-    that could not be parsed, so a single bad card never loses the others.
+
+def parse_cards(text: str) -> tuple[list[str], list[str]]:
+    """Convert every vCard in ``text`` independently to vCard 3.0.
+
+    Returns the serialized vCard 3.0 cards and the raw text of every card that
+    could not be converted (including a card cut off before its END:VCARD), so a
+    single bad card never loses the others and nothing is dropped silently.
     """
-    cards, unparsed = [], []
-    for raw in _CARD_RE.findall(text):
+    cards: list[str] = []
+    unparsed: list[str] = []
+
+    def keep_leftover(gap: str) -> None:
+        begin = _BEGIN_RE.search(gap)
+        if begin:
+            unparsed.append(gap[begin.start():].rstrip("\r\n"))
+
+    position = 0
+    for match in _CARD_RE.finditer(text):
+        keep_leftover(text[position:match.start()])
+        position = match.end()
+        raw = match.group(0)
         try:
-            card = vobject.readOne(_sanitize(raw))
+            cards.append(_export_card(raw))
         except Exception:
             unparsed.append(raw)
-            continue
-        cards.append(_normalize(card))
+    keep_leftover(text[position:])
     return cards, unparsed
 
 
@@ -191,8 +212,10 @@ def export_contacts(scan_dir: Path, out_path: Path) -> ContactExportResult:
     unparsed: list[str] = []
     result = ContactExportResult(exported=0)
     for source in sources:
-        cards, bad = parse_cards(source.path.read_text(encoding="utf-8", errors="replace"))
-        serialized.extend(card.serialize() for card in cards)
+        # Decoded without newline translation so unparsed cards stay byte-exact.
+        text = source.path.read_bytes().decode("utf-8", errors="replace")
+        cards, bad = parse_cards(text)
+        serialized.extend(cards)
         unparsed.extend(bad)
         result.per_source[source.label] = len(cards)
         result.exported += len(cards)

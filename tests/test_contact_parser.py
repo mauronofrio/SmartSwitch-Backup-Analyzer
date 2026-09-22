@@ -8,11 +8,17 @@ from ssba.core.parsers.contact import parse_cards
 from tests.contact_fixtures import FAKE_JPEG, PROFILE_VCF
 
 
-def _one(text: str):
+def _exported(text: str) -> str:
     cards, unparsed = parse_cards(text)
     assert unparsed == []
     assert len(cards) == 1
+    assert isinstance(cards[0], str)
     return cards[0]
+
+
+def _one(text: str):
+    """Export ``text`` and re-parse the vCard 3.0 result, as an importer would."""
+    return vobject.readOne(_exported(text))
 
 
 def _card(*lines: str) -> str:
@@ -65,10 +71,10 @@ def test_missing_name_falls_back_to_phone_for_fn():
 
 
 def test_v21_parameters_become_v3_type_and_encoding():
-    card = _one(_card("N:Rossi;Mario;;;", "TEL;CELL;PREF:+39 333 000 0001"))
+    out = _exported(_card("N:Rossi;Mario;;;", "TEL;CELL;PREF:+39 333 000 0001"))
+    card = vobject.readOne(out)
     assert card.tel.params.get("TYPE") == ["CELL", "PREF"]
     assert card.tel.singletonparams == []
-    out = card.serialize()
     assert "VERSION:3.0" in out
     assert "TEL;TYPE=CELL,PREF:+39 333 000 0001" in out
 
@@ -77,13 +83,42 @@ def test_unparseable_card_is_kept_raw_and_neighbours_still_parse():
     bad = _card("THIS LINE HAS NO COLON")
     text = _card("N:Uno;Primo;;;") + bad + _card("N:Due;Secondo;;;")
     cards, unparsed = parse_cards(text)
-    assert [c.fn.value for c in cards] == ["Primo Uno", "Secondo Due"]
+    assert [vobject.readOne(c).fn.value for c in cards] == ["Primo Uno", "Secondo Due"]
     assert unparsed == [bad.rstrip("\r\n")]
 
 
+def test_card_without_version_is_exported_as_vcard3():
+    again = _one("BEGIN:VCARD\r\nN:Rossi;Mario;;;\r\nEND:VCARD\r\n")
+    assert again.version.value == "3.0"
+    assert again.fn.value == "Mario Rossi"
+
+
+def test_card_that_cannot_be_serialized_is_kept_raw_and_neighbours_still_export():
+    # vCard 3.0 allows one N: vobject parses this card but refuses to serialize it.
+    bad = _card("N:Uno;Primo;;;", "N:Due;Secondo;;;")
+    text = _card("N:Tre;Terzo;;;") + bad + _card("N:Quattro;Quarto;;;")
+    cards, unparsed = parse_cards(text)
+    assert [vobject.readOne(c).fn.value for c in cards] == ["Terzo Tre", "Quarto Quattro"]
+    assert unparsed == [bad.rstrip("\r\n")]
+
+
+def test_truncated_trailing_card_goes_to_unparsed():
+    truncated = "BEGIN:VCARD\r\nVERSION:2.1\r\nN:Rossi;Mario;;;\r\nTEL;CELL:+39 333"
+    cards, unparsed = parse_cards(_card("N:Uno;Primo;;;") + truncated)
+    assert len(cards) == 1
+    assert unparsed == [truncated]
+
+
+def test_truncated_card_in_the_middle_goes_to_unparsed_and_the_next_card_exports():
+    truncated = "BEGIN:VCARD\r\nVERSION:2.1\r\nN:Rossi;Mario;;;"
+    text = _card("N:Uno;Primo;;;") + truncated + "\r\n" + _card("N:Due;Secondo;;;")
+    cards, unparsed = parse_cards(text)
+    assert [vobject.readOne(c).fn.value for c in cards] == ["Primo Uno", "Secondo Due"]
+    assert unparsed == [truncated]
+
+
 def test_profile_fixture_round_trips_as_vcard3():
-    card = _one(PROFILE_VCF)
-    again = vobject.readOne(card.serialize())
+    again = _one(PROFILE_VCF)
     assert again.version.value == "3.0"
     assert again.fn.value == "Paolo Verdi"
     assert again.photo.value == FAKE_JPEG

@@ -137,3 +137,26 @@ def test_find_sources_skips_path_traversal_attempts(tmp_path):
     # Only good.vcf should be included; the others should be skipped
     assert len(sources) == 1
     assert sources[0].label == "good.vcf"
+
+
+def test_export_keeps_going_when_one_card_cannot_be_serialized(tmp_path):
+    two_names = "BEGIN:VCARD\r\nVERSION:2.1\r\nN:Uno;Primo;;;\r\nN:Due;Secondo;;;\r\nEND:VCARD\r\n"
+    scan_dir = build_scan_dir(tmp_path / "scan", google=GOOGLE_VCF + two_names)
+    out = tmp_path / "contacts.vcf"
+
+    result = export_contacts(scan_dir, out)
+
+    assert result.exported == 4
+    assert result.unparsed == 1
+    assert "N:Due;Secondo;;;" in result.unparsed_path.read_text(encoding="utf-8")
+
+
+def test_export_keeps_unparsed_cards_byte_for_byte(tmp_path):
+    truncated = "BEGIN:VCARD\r\nVERSION:2.1\r\nN:Rossi;Mario;;;\r\nTEL;CELL:+39 333"
+    scan_dir = build_scan_dir(tmp_path / "scan", google=GOOGLE_VCF + truncated)
+    out = tmp_path / "contacts.vcf"
+
+    result = export_contacts(scan_dir, out)
+
+    assert result.unparsed == 1
+    assert result.unparsed_path.read_bytes() == (truncated + "\r\n").encode("utf-8")
