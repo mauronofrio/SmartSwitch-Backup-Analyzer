@@ -147,6 +147,75 @@ def test_scan_category_non_document_zip_still_recursed(tmp_path):
     assert counts["plaintext_passthrough"] == 2  # Contact.zip itself + readme.txt
 
 
+def test_scan_category_encrypted_docx_preserved_as_opaque_file(tmp_path):
+    """Guard point 2: an encrypted attachment that decrypts to zip bytes and
+    is named like a document (e.g. invoice.docx) must also be preserved as
+    a single file - not recursed into - once decrypted. This covers the
+    `blob.kind == "zip"` branch in _process, the decrypted counterpart of
+    test_scan_category_docx_preserved_as_opaque_file (which covers the
+    plaintext_passthrough branch).
+    """
+    _write_history_xml(tmp_path)
+
+    docx_bytes = _zip_bytes(
+        {
+            "[Content_Types].xml": b"<?xml version='1.0'?><Types/>",
+            "word/document.xml": b"<?xml version='1.0'?><w:document/>",
+        }
+    )
+    encrypted_docx = encrypt_iv_prefixed(docx_bytes, KEY)
+
+    (tmp_path / "CATEGORY_G").mkdir()
+    (tmp_path / "CATEGORY_G" / "invoice.docx").write_bytes(encrypted_docx)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "CATEGORY_G", KEY, out_dir)
+
+    docx_out_path = out_dir / "CATEGORY_G" / "invoice.docx"
+    assert docx_out_path.is_file(), "expected the decrypted .docx to be written as a single file"
+    # The scanner's AES-CBC decryption zero-pads to a 16-byte block boundary
+    # and doesn't strip that padding (it's not reversible in general for
+    # arbitrary binary content), so the written bytes are the original zip
+    # plus trailing null padding - harmless to zip readers, which stop at
+    # the end-of-central-directory record. Verify via the prefix and by
+    # actually opening it as a zip, rather than requiring exact equality.
+    written = docx_out_path.read_bytes()
+    assert written.startswith(docx_bytes)
+    assert written[len(docx_bytes) :] == b"\x00" * (len(written) - len(docx_bytes))
+    with zipfile.ZipFile(docx_out_path) as zf:
+        assert set(zf.namelist()) == {"[Content_Types].xml", "word/document.xml"}
+        assert zf.read("word/document.xml") == b"<?xml version='1.0'?><w:document/>"
+
+    # No exploded directory structure for the decrypted .docx's internal parts.
+    assert not (docx_out_path / "word").exists()
+
+    assert len(result.files) == 1
+    file_result = result.files[0]
+    assert file_result.relative_path == "invoice.docx"
+    assert file_result.status == "decrypted"
+    assert file_result.kind == "zip"
+
+
+def test_scan_category_docx_extension_matched_case_insensitively(tmp_path):
+    """The document-extension allowlist check must be case-insensitive."""
+    _write_history_xml(tmp_path)
+
+    docx_bytes = _zip_bytes({"[Content_Types].xml": b"<?xml version='1.0'?><Types/>"})
+
+    (tmp_path / "CATEGORY_H").mkdir()
+    (tmp_path / "CATEGORY_H" / "INVOICE.DOCX").write_bytes(docx_bytes)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "CATEGORY_H", KEY, out_dir)
+
+    docx_out_path = out_dir / "CATEGORY_H" / "INVOICE.DOCX"
+    assert docx_out_path.is_file(), "expected uppercase .DOCX to be matched case-insensitively"
+    assert docx_out_path.read_bytes() == docx_bytes
+    assert len(result.files) == 1
+    assert result.files[0].status == "plaintext_passthrough"
+    assert result.files[0].kind == "zip"
+
+
 def test_scan_category_undecodable_file(tmp_path):
     _build_fake_backup(tmp_path)
     out_dir = tmp_path / "out"
