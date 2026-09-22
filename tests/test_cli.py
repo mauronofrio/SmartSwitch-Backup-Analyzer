@@ -124,6 +124,17 @@ def test_export_contacts_success(tmp_path, capsys):
     assert "4 contacts written to" in captured.out
 
 
+def test_export_contacts_unwritable_out_is_an_error_not_a_traceback(tmp_path, capsys):
+    scan_dir = build_scan_dir(tmp_path / "scan")
+    out = tmp_path / "contacts.vcf"
+    out.mkdir()
+
+    exit_code = run(["export", "contacts", str(scan_dir), "--out", str(out)])
+
+    assert exit_code == 1
+    assert capsys.readouterr().err.startswith("error: cannot write")
+
+
 def test_export_contacts_missing_report(tmp_path, capsys):
     exit_code = run(["export", "contacts", str(tmp_path), "--out", str(tmp_path / "c.vcf")])
 

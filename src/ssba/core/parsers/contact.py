@@ -326,10 +326,10 @@ def find_contact_sources(scan_dir: Path) -> list[ContactSource]:
 
     # Validate report structure: top level must be dict, categories must be list
     if not isinstance(report, dict):
-        raise ContactExportError(f"report.json is not readable: top level is not an object")
+        raise ContactExportError("report.json is not readable: top level is not an object")
     categories = report.get("categories", [])
     if not isinstance(categories, list):
-        raise ContactExportError(f"report.json is not readable: categories is not a list")
+        raise ContactExportError("report.json is not readable: categories is not a list")
 
     category = next(
         (c for c in categories if isinstance(c, dict) and c.get("category") == "CONTACT"),
@@ -385,9 +385,12 @@ def export_contacts(scan_dir: Path, out_path: Path) -> ContactExportResult:
     unparsed: list[str] = []
     result = ContactExportResult(exported=0)
     for source in sources:
+        try:
+            data = source.path.read_bytes()
+        except OSError as exc:
+            raise ContactExportError(f"cannot read {source.path}: {exc}") from exc
         # Decoded without newline translation so unparsed cards stay byte-exact.
-        text = source.path.read_bytes().decode("utf-8", errors="replace")
-        cards, bad = parse_cards(text)
+        cards, bad = parse_cards(data.decode("utf-8", errors="replace"))
         serialized.extend(cards)
         unparsed.extend(bad)
         result.per_source[source.label] = len(cards)
@@ -396,11 +399,18 @@ def export_contacts(scan_dir: Path, out_path: Path) -> ContactExportResult:
     if result.exported == 0:
         raise ContactExportError("no contacts could be parsed from the recovered .vcf files")
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("".join(serialized), encoding="utf-8", newline="")
+    unparsed_path = out_path.with_name(f"{out_path.stem}_unparsed.vcf")
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("".join(serialized), encoding="utf-8", newline="")
+        if unparsed:
+            unparsed_path.write_text("\r\n".join(unparsed) + "\r\n", encoding="utf-8", newline="")
+        else:
+            # A side file left by an earlier run would claim cards are missing.
+            unparsed_path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise ContactExportError(f"cannot write {exc.filename or out_path}: {exc}") from exc
     if unparsed:
-        unparsed_path = out_path.with_name(f"{out_path.stem}_unparsed.vcf")
-        unparsed_path.write_text("\r\n".join(unparsed) + "\r\n", encoding="utf-8", newline="")
         result.unparsed = len(unparsed)
         result.unparsed_path = unparsed_path
     return result

@@ -69,6 +69,37 @@ def test_export_writes_unparsed_cards_to_side_file(tmp_path):
     assert "THIS LINE HAS NO COLON" in result.unparsed_path.read_text(encoding="utf-8")
 
 
+def test_clean_export_removes_a_stale_unparsed_file(tmp_path):
+    scan_dir = build_scan_dir(tmp_path / "scan")
+    out = tmp_path / "contacts.vcf"
+    stale = tmp_path / "contacts_unparsed.vcf"
+    stale.write_text("BEGIN:VCARD\r\nfrom an earlier run\r\n", encoding="utf-8")
+
+    result = export_contacts(scan_dir, out)
+
+    assert result.unparsed == 0
+    assert not stale.exists()
+
+
+def test_export_to_a_directory_raises_contact_export_error(tmp_path):
+    scan_dir = build_scan_dir(tmp_path / "scan")
+    out = tmp_path / "contacts.vcf"
+    out.mkdir()
+
+    with pytest.raises(ContactExportError, match="cannot write"):
+        export_contacts(scan_dir, out)
+
+
+def test_unwritable_unparsed_side_file_raises_contact_export_error(tmp_path):
+    broken = "BEGIN:VCARD\r\nVERSION:2.1\r\nTHIS LINE HAS NO COLON\r\nEND:VCARD\r\n"
+    scan_dir = build_scan_dir(tmp_path / "scan", google=GOOGLE_VCF + broken)
+    out = tmp_path / "contacts.vcf"
+    (tmp_path / "contacts_unparsed.vcf").mkdir()
+
+    with pytest.raises(ContactExportError, match="cannot write"):
+        export_contacts(scan_dir, out)
+
+
 def test_export_with_no_vcf_sources_raises(tmp_path):
     (tmp_path / "report.json").write_text(
         '{"categories": [{"category": "CONTACT", "counts": {}, "files": []}]}', encoding="utf-8"
@@ -125,8 +156,10 @@ def test_find_sources_skips_path_traversal_attempts(tmp_path):
     # Create a valid VCF inside the CONTACT dir
     (contact_dir / "good.vcf").write_text(PHONE_NAME, encoding="utf-8", newline="")
 
-    # Create files outside the CONTACT dir that path traversal might find
+    # Create files outside the CONTACT dir that path traversal might find; both
+    # exist, so only the containment check can keep them out.
     (tmp_path / "outside.vcf").write_text(GOOGLE_VCF, encoding="utf-8", newline="")
+    (tmp_path / "direct.vcf").write_text(GOOGLE_VCF, encoding="utf-8", newline="")
 
     # Create report with escaping attempts
     import json
