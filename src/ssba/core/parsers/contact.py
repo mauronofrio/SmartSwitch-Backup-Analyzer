@@ -52,6 +52,11 @@ _VERBATIM = {"BEGIN", "END", "VERSION", "GEO"}
 # ones Android's own 2.1 parser unescapes, plus \n, which its writer emits for
 # newlines. Any other backslash is a literal character.
 _V21_ESCAPES = {"\\": "\\", ";": ";", ",": ",", ":": ":", "n": "\n", "N": "\n"}
+# Image formats a PHOTO/LOGO TYPE may name (vCard 2.1's list, plus PNG).
+_IMAGE_FORMATS = {
+    "GIF", "CGM", "WMF", "BMP", "MET", "PMB", "DIB", "PICT", "TIFF", "PS", "PDF",
+    "JPEG", "MPEG", "MPEG2", "AVI", "QTIME", "PNG",
+}
 _TRANSFER_PARAMS = {
     "QUOTED-PRINTABLE", "ENCODING=QUOTED-PRINTABLE",
     "8BIT", "ENCODING=8BIT", "7BIT", "ENCODING=7BIT",
@@ -210,6 +215,14 @@ def _params_to_v3(line) -> None:
             if param not in types:
                 types.append(param)
         line.singletonparams = []
+    if line.name.upper() in ("PHOTO", "LOGO") and "TYPE" in line.params:
+        # In vCard 3.0 a PHOTO/LOGO TYPE is the image format, nothing else
+        # (Samsung adds PREF and SUPREF).
+        formats = [t for t in line.params["TYPE"] if t.strip().upper() in _IMAGE_FORMATS]
+        if formats:
+            line.params["TYPE"] = formats
+        else:
+            del line.params["TYPE"]
 
 
 def _formatted_name(card) -> str:
@@ -249,14 +262,12 @@ def _normalize(card, custom: list[str]):
         card.contents.pop("categories", None)
         card.add("categories").value = categories
 
-    departments = card.contents.pop("department", [])
+    departments = [line.value for line in card.contents.pop("department", [])]
     if departments:
-        department = departments[0].value
         if "org" in card.contents:
-            first = card.org.value[0] if card.org.value else ""
-            card.org.value = [first, department]
+            card.org.value = [*card.org.value, *departments]
         else:
-            card.add("org").value = [department]
+            card.add("org").value = departments
 
     if "fn" not in card.contents:
         card.add("fn").value = _formatted_name(card)

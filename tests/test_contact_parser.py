@@ -66,6 +66,57 @@ def test_department_alone_becomes_org():
     assert card.org.value == ["Vendite"]
 
 
+def test_every_department_is_appended_to_org():
+    card = _one(_card("N:Rossi;Mario;;;", "ORG:Example Srl", "DEPARTMENT:Vendite", "DEPARTMENT:Estero"))
+    assert card.org.value == ["Example Srl", "Vendite", "Estero"]
+
+
+def test_departments_keep_existing_org_units():
+    card = _one(_card("N:Rossi;Mario;;;", "ORG:Example Srl;Divisione", "DEPARTMENT:Vendite"))
+    assert card.org.value == ["Example Srl", "Divisione", "Vendite"]
+
+
+def test_several_departments_alone_become_org():
+    card = _one(_card("N:Rossi;Mario;;;", "DEPARTMENT:Vendite", "DEPARTMENT:Estero"))
+    assert card.org.value == ["Vendite", "Estero"]
+
+
+def test_photo_type_keeps_only_the_image_format():
+    b64 = base64.b64encode(FAKE_JPEG).decode()
+    out = _exported(_card("N:Rossi;Mario;;;", f"PHOTO;ENCODING=BASE64;PREF;JPEG;SUPREF:{b64}"))
+    card = vobject.readOne(out)
+    assert card.photo.params["TYPE"] == ["JPEG"]
+    assert card.photo.value == FAKE_JPEG
+    assert "PREF" not in out
+
+
+def test_logo_type_keeps_only_the_image_format():
+    b64 = base64.b64encode(b"\x89PNGFAKE").decode()
+    card = _one(_card("N:Rossi;Mario;;;", f"LOGO;ENCODING=BASE64;TYPE=PNG;PREF:{b64}"))
+    assert card.logo.params["TYPE"] == ["PNG"]
+
+
+def test_photo_without_an_image_format_gets_no_type():
+    b64 = base64.b64encode(FAKE_JPEG).decode()
+    card = _one(_card("N:Rossi;Mario;;;", f"PHOTO;ENCODING=BASE64;PREF:{b64}"))
+    assert "TYPE" not in card.photo.params
+
+
+def test_missing_name_falls_back_to_org_for_fn():
+    card = _one(_card("ORG:Example Srl;Vendite", "TEL;CELL:+39 333 000 0009"))
+    assert card.fn.value == "Example Srl"
+
+
+def test_missing_name_and_org_falls_back_to_email_for_fn():
+    card = _one(_card("EMAIL;HOME:mario@example.com", "TEL;CELL:+39 333 000 0009"))
+    assert card.fn.value == "mario@example.com"
+
+
+def test_card_with_nothing_to_name_it_gets_unknown_fn():
+    card = _one(_card("X-FAVORITE:1"))
+    assert card.fn.value == "Unknown"
+
+
 def test_missing_name_falls_back_to_phone_for_fn():
     card = _one(_card("TEL;CELL:+39 333 000 0009"))
     assert card.fn.value == "+39 333 000 0009"
