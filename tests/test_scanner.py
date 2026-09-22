@@ -383,27 +383,24 @@ def test_scan_category_apk_never_recursed_even_in_flat_category(tmp_path):
 def test_scan_category_known_container_chain_recursed_end_to_end(tmp_path):
     """Regression-guards real Notes recovery, the project's single most
     important already-validated real-world case: sdoc.snmm and sdoc.bk are
-    both exact-name entries in KNOWN_SMART_SWITCH_CONTAINERS, so the
-    two-layer encrypted chain (sdoc.snmm -> decrypts to a zip containing
-    sdoc.bk -> decrypts to a zip containing the real note content) must
-    keep being opened all the way down, exactly as before.
+    both exact-name entries in KNOWN_SMART_SWITCH_CONTAINERS, and
+    b_1.sdocx (one of Notes' individual per-note attachment packages) is
+    recognized by its .sdocx extension (KNOWN_SMART_SWITCH_EXTENSIONS,
+    since per-note ids vary and can't be exact-name catalogued). So the
+    full three-layer encrypted/nested chain (sdoc.snmm -> decrypts to a
+    zip containing sdoc.bk -> decrypts to a zip containing
+    SmartSwitchRestoreDB/marker.txt and b_1.sdocx -> b_1.sdocx itself a
+    zip containing the real note media) must be opened all the way down.
 
     (An earlier design considered here made this decision from a one-time
     "is this category flat" structural flag computed once per category and
     threaded through recursion - that approach was reconsidered as too
     fragile and replaced by this small, explicit, hand-verified catalog.
-    Since KNOWN_SMART_SWITCH_CONTAINERS is a stateless per-name lookup with
-    no flag to thread or accidentally re-derive, the "does the decision
-    survive intermediate recursion output" concern that motivated the old
-    design no longer applies here by construction.)
-
-    This also documents a real, deliberate behavior change at the next
-    level down: b_1.sdocx (one of Notes' individual per-note attachment
-    packages) is NOT in the catalog and contains no
-    "[Content_Types].xml"/"mimetype" of its own, so under the new
-    conservative default it is preserved as a single opaque file rather
-    than recursed into - catalog membership is evaluated per-name at each
-    level, it is not inherited from an ancestor being a known container.
+    Since KNOWN_SMART_SWITCH_CONTAINERS/KNOWN_SMART_SWITCH_EXTENSIONS are
+    stateless per-name/per-extension lookups with nothing to thread or
+    accidentally re-derive, the "does the decision survive intermediate
+    recursion output" concern that motivated the old design no longer
+    applies here by construction.)
     """
     _write_history_xml(tmp_path)
 
@@ -414,7 +411,8 @@ def test_scan_category_known_container_chain_recursed_end_to_end(tmp_path):
 
     # inner_zip is what sdoc.bk decrypts to: a loose plaintext file
     # (SmartSwitchRestoreDB/marker.txt) alongside a per-note package
-    # (b_1.sdocx) that is itself zip-shaped but NOT catalogued.
+    # (b_1.sdocx) that is itself zip-shaped, not exact-name catalogued,
+    # but recognized by its .sdocx extension.
     inner_zip = _zip_bytes(
         {
             "SmartSwitchRestoreDB/marker.txt": marker_content,
@@ -444,19 +442,61 @@ def test_scan_category_known_container_chain_recursed_end_to_end(tmp_path):
     assert marker_out.is_file()
     assert marker_out.read_bytes() == marker_content
 
-    # b_1.sdocx is NOT catalogued and not a recognized document by
-    # content, so under the conservative default it must be preserved
-    # whole - not exploded - even though it sits right next to content
-    # that DID get opened, and even though the note media inside it
-    # (media/final.pdf) is never separately extracted as a result.
-    b1_out = (
-        out_dir / "SAMSUNGNOTE_LIKE" / "sdoc.snmm" / "sdoc.bk" / "b_1.sdocx"
+    # b_1.sdocx must now also be recursed into (via the .sdocx extension
+    # rule), reaching the real note media inside it.
+    final_out = (
+        out_dir / "SAMSUNGNOTE_LIKE" / "sdoc.snmm" / "sdoc.bk"
+        / "b_1.sdocx" / "media" / "final.pdf"
     )
-    assert b1_out.is_file(), (
-        "b_1.sdocx is not in KNOWN_SMART_SWITCH_CONTAINERS, so it must be "
-        "preserved as a single opaque file rather than recursed into"
+    assert final_out.is_file(), (
+        "b_1.sdocx has a .sdocx extension, so it must be recursed into to "
+        "reach media/final.pdf, not preserved as a single opaque file"
     )
-    assert b1_out.read_bytes() == b1_sdocx_zip
+    assert final_out.read_bytes() == final_content
+
+
+def test_scan_category_sdocx_extension_recursed_as_known_container(tmp_path):
+    """.sdocx is a proprietary Samsung Notes per-note package extension -
+    never a format a real user would create themselves - so any file with
+    that extension (case-insensitive) must always be recursed into, even
+    though its per-note id makes it impossible to exact-name catalogue in
+    KNOWN_SMART_SWITCH_CONTAINERS and it isn't a recognized document by
+    content. This closes the gap flagged after the catalog-based design
+    landed: b_<id>.sdocx packages were being preserved whole instead of
+    having their contents (note.note, media/*) reached. Named with a
+    realistic id (b_1665469124387.sdocx) to match the real pattern, not
+    just a placeholder.
+    """
+    _write_history_xml(tmp_path)
+
+    media_content = b"fake jpeg-ish media bytes for a note attachment"
+    note_content = b'{"note": "some real note content"}'
+    sdocx_zip = _zip_bytes(
+        {
+            "note.note": note_content,
+            "media/photo.jpg": media_content,
+        }
+    )
+
+    (tmp_path / "SAMSUNGNOTE_PACKAGES").mkdir()
+    (tmp_path / "SAMSUNGNOTE_PACKAGES" / "b_1665469124387.sdocx").write_bytes(sdocx_zip)
+
+    out_dir = tmp_path / "out"
+    result = scan_category(tmp_path, "SAMSUNGNOTE_PACKAGES", KEY, out_dir)
+
+    assert result.counts()["error"] == 0, f"expected no errors, got {result.files}"
+
+    note_out = (
+        out_dir / "SAMSUNGNOTE_PACKAGES" / "b_1665469124387.sdocx" / "note.note"
+    )
+    assert note_out.is_file(), ".sdocx must be recursed into to reach note.note"
+    assert note_out.read_bytes() == note_content
+
+    media_out = (
+        out_dir / "SAMSUNGNOTE_PACKAGES" / "b_1665469124387.sdocx" / "media" / "photo.jpg"
+    )
+    assert media_out.is_file(), ".sdocx must be recursed into to reach media/*"
+    assert media_out.read_bytes() == media_content
 
 
 def test_scan_category_undecodable_file(tmp_path):

@@ -50,6 +50,16 @@ KNOWN_SMART_SWITCH_CONTAINERS = frozenset({
     "CALLLOG.zip",     # CALLLOG: outer wrapper, contains call_log.exml
 })
 
+# Known Smart Switch internal container EXTENSIONS, as opposed to the
+# exact-filename catalog above. .sdocx is SAMSUNGNOTE's own per-note
+# package format (one b_<id>.sdocx per note, inside sdoc.bk) - the id
+# varies per note, so these can't be exact-name catalogued the way
+# sdoc.snmm/sdoc.bk can. This is still safe to recurse unconditionally:
+# .sdocx is a proprietary Samsung Notes internal extension, never a
+# format a real end user would create themselves (unlike a generic
+# .zip), so there's no risk of exploding a user's own file here.
+KNOWN_SMART_SWITCH_EXTENSIONS = frozenset({".sdocx"})
+
 
 @dataclass
 class FileResult:
@@ -209,14 +219,26 @@ def _is_zip_shaped_document(data: bytes) -> bool:
 
 
 def _is_known_smart_switch_container(name: str) -> bool:
-    """True if `name`'s basename exactly matches one of Smart Switch's own
-    known internal wrapper containers (KNOWN_SMART_SWITCH_CONTAINERS).
-    Matching is by exact filename, case-sensitive: these are fixed,
-    Smart-Switch-generated names, not user-supplied ones (unlike the
-    document-extension case, which needed case-insensitivity because users
-    and apps produce inconsistently-cased filenames).
+    """True if `name` is recognized as one of Smart Switch's own internal
+    wrapper containers, by either of two distinct mechanisms:
+
+    - Exact filename match against KNOWN_SMART_SWITCH_CONTAINERS,
+      case-sensitive: a handful of specific, individually hand-verified
+      Smart-Switch-generated names (fixed names, not user-supplied ones,
+      so case-sensitivity is correct here - unlike the document-extension
+      case below, which needs case-insensitivity because users and apps
+      produce inconsistently-cased filenames).
+    - Extension match against KNOWN_SMART_SWITCH_EXTENSIONS,
+      case-insensitive: a whole proprietary-extension family (currently
+      just .sdocx) where the filenames themselves vary per instance (e.g.
+      a note id) and can't be exact-name catalogued, but the extension
+      alone is enough to know it's Smart Switch's own internal packaging.
     """
-    return _basename(name) in KNOWN_SMART_SWITCH_CONTAINERS
+    basename = _basename(name)
+    if basename in KNOWN_SMART_SWITCH_CONTAINERS:
+        return True
+    _, _, ext = basename.rpartition(".")
+    return bool(ext) and f".{ext.lower()}" in KNOWN_SMART_SWITCH_EXTENSIONS
 
 
 def _should_recurse_into_zip(name: str, data: bytes) -> bool:
