@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from ssba.core.parsers.wifi import (
@@ -156,3 +158,23 @@ def test_unwritable_output_raises(tmp_path):
     out.mkdir()
     with pytest.raises(WifiExportError, match="cannot write"):
         export_wifi(scan_dir, out)
+
+
+def test_qr_codes_and_passwords_are_shown_only_on_request(tmp_path):
+    scan_dir = build_wifi_scan_dir(tmp_path / "scan")
+    out = tmp_path / "wifi.html"
+    export_wifi(scan_dir, out)
+    html = out.read_text(encoding="utf-8")
+    assert html.count("<summary>Show QR code</summary><svg") == 3
+    assert html.count("<svg") == 3
+    assert "<summary>Show password</summary><code>segreta123</code></details>" in html
+    assert re.search(r"<td>segreta123</td>", html) is None
+
+
+def test_network_without_password_has_no_password_section(tmp_path):
+    scan_dir = build_wifi_scan_dir(tmp_path / "scan")
+    out = tmp_path / "wifi.html"
+    export_wifi(scan_dir, out)
+    row = next(r for r in out.read_text(encoding="utf-8").split("<tr>") if "Bar Aperto" in r)
+    assert "Show password" not in row
+    assert "Show QR code" in row

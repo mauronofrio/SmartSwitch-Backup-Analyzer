@@ -161,21 +161,29 @@ def export_wifi(scan_dir: Path, out_path: Path) -> WifiExportResult:
     rows = []
     for network in networks:
         payload = qr_payload(network)
-        qr = segno.make(payload, error="m", micro=False).svg_inline(scale=4) if payload else "\u2014"
+        if payload:
+            svg = segno.make(payload, error="m", micro=False).svg_inline(scale=8)
+            qr = f"<details><summary>Show QR code</summary>{svg}</details>"
+        else:
+            qr = "\u2014"
+        password = (
+            f"<details><summary>Show password</summary><code>{esc(network.password)}</code></details>"
+            if network.password
+            else "\u2014"
+        )
         cells = (
             esc(network.ssid),
             esc(_SECURITY_LABELS[network.security]),
-            esc(network.password) if network.password else "\u2014",
             "yes" if network.hidden else "no",
             qr,
+            password,
         )
         rows.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
     body = (
         '<p class="note">This page contains Wi-Fi passwords in clear text. Keep it private.</p>\n'
         "<p>To add a network on Android: Settings &rarr; Wi-Fi &rarr; the QR code icon "
-        "next to &ldquo;Add network&rdquo;, then scan its code.</p>\n"
-        "<table>\n<tr><th>Network</th><th>Security</th><th>Password</th>"
-        "<th>Hidden</th><th>QR code</th></tr>\n" + "\n".join(rows) + "\n</table>"
+        "next to &ldquo;Add network&rdquo;, then scan its code. Open \u201cShow QR code\u201d and scan it with the phone.</p>\n"
+        "<table>\n<tr><th>Network</th><th>Security</th><th>Hidden</th><th>QR code</th><th>Password</th></tr>\n" + "\n".join(rows) + "\n</table>"
     )
     write_output(out_path, page("Wi-Fi networks", body), WifiExportError)
     return WifiExportResult(
