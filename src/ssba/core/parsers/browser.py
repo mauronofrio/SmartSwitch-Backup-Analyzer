@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import html
 import sqlite3
 import tempfile
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +38,15 @@ class BrowserExportResult:
     history: int = 0
     downloads: int = 0
     skipped: int = 0
+
+
+def _bookmark_esc(text: str) -> str:
+    """Escape for bookmarks.html: Chrome's importer decodes only &lt; &gt;
+    &amp; &quot; &#39; and reads the file line by line, so line breaks must
+    become spaces and quotes must use the numeric &#39; form, not &#x27;."""
+    text = text.replace("\r", " ").replace("\n", " ")
+    text = html.escape(text, quote=False)
+    return text.replace('"', "&quot;").replace("'", "&#39;")
 
 
 def _text(value) -> str:
@@ -85,7 +96,7 @@ def _render(children: dict, parent, depth: int, visited: set, result: BrowserExp
         visited.add(row["_ID"])
         if row["FOLDER"] == 1:
             result.folders += 1
-            lines.append(f"{pad}<DT><H3>{esc(_text(row['TITLE']) or 'Untitled folder')}</H3>")
+            lines.append(f"{pad}<DT><H3>{_bookmark_esc(_text(row['TITLE']) or 'Untitled folder')}</H3>")
             lines.append(f"{pad}<DL><p>")
             lines += _render(children, row["_ID"], depth + 1, visited, result)
             lines.append(f"{pad}</DL><p>")
@@ -95,7 +106,9 @@ def _render(children: dict, parent, depth: int, visited: set, result: BrowserExp
             result.skipped += 1
             continue
         result.bookmarks += 1
-        lines.append(f'{pad}<DT><A HREF="{esc(url)}">{esc(_text(row["TITLE"]) or url)}</A>')
+        lines.append(
+            f'{pad}<DT><A HREF="{_bookmark_esc(url)}">{_bookmark_esc(_text(row["TITLE"]) or url)}</A>'
+        )
     return lines
 
 
@@ -136,7 +149,9 @@ def _quick_access_lines(con: sqlite3.Connection, result: BrowserExportResult) ->
             result.skipped += 1
             continue
         result.quick_access += 1
-        lines.append(f'        <DT><A HREF="{esc(url)}">{esc(_text(row["title"]) or url)}</A>')
+        lines.append(
+            f'        <DT><A HREF="{_bookmark_esc(url)}">{_bookmark_esc(_text(row["title"]) or url)}</A>'
+        )
     if not lines:
         return []
     return ["    <DT><H3>Quick access</H3>", "    <DL><p>", *lines, "    </DL><p>"]
@@ -198,12 +213,14 @@ def export_browser(scan_dir: Path, out_dir: Path) -> BrowserExportResult:
         with tempfile.TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
             bookmarks_db = _extract(archive, _BOOKMARKS_DB, tmp)
+            if bookmarks_db is None:
+                raise BrowserExportError("no Samsung Internet backup found in the scan output")
             tree = _with_db(bookmarks_db, lambda con: _bookmark_lines(con, result))
             quick_db = _extract(archive, _QUICK_ACCESS_DB, tmp)
             quick = _with_db(quick_db, lambda con: _quick_access_lines(con, result)) if quick_db else []
             history_db = _extract(archive, _HISTORY_DB, tmp)
             urls, downloads = _with_db(history_db, _read_history) if history_db else ([], [])
-    except (OSError, zipfile.BadZipFile, sqlite3.Error) as exc:
+    except (OSError, zipfile.BadZipFile, sqlite3.Error, zlib.error, NotImplementedError, RuntimeError) as exc:
         raise BrowserExportError(f"cannot read {archive}: {exc}") from exc
 
     result.history = len(urls)

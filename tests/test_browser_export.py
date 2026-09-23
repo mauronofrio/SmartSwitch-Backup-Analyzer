@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
+import struct
 import zipfile
 from html.parser import HTMLParser
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +12,23 @@ from ssba.core.parsers.browser import BrowserExportError, export_browser
 from ssba.core.parsers.html_page import format_time
 from tests.browser_fixtures import build_browser_scan_dir
 from tests.scan_fixtures import add_category, entry
+
+
+def _corrupt_zip_member(path: Path, member: str, payload: bytes) -> None:
+    """Write ``member`` deflated, then flip bytes inside its compressed data."""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(member, payload)
+    with zipfile.ZipFile(path) as zf:
+        info = zf.getinfo(member)
+    with open(path, "rb") as f:
+        f.seek(info.header_offset)
+        header = f.read(30)
+    fname_len, extra_len = struct.unpack("<HH", header[26:30])
+    data_start = info.header_offset + 30 + fname_len + extra_len
+    data = bytearray(path.read_bytes())
+    for i in range(data_start, data_start + min(info.compress_size, 16)):
+        data[i] ^= 0xFF
+    path.write_bytes(bytes(data))
 
 
 class _Tree(HTMLParser):
@@ -84,6 +104,24 @@ def test_bookmark_titles_and_urls_are_escaped(tmp_path):
     assert "y=&quot;2&quot;" in html
 
 
+def test_bookmark_file_uses_the_bookmark_specific_escaper(tmp_path):
+    # Chrome's bookmark-file importer only decodes &lt; &gt; &amp; &quot; &#39;
+    # and reads the file line by line, so apostrophes and line breaks need
+    # different handling than the general-purpose `esc`.
+    bookmarks = [
+        (1, "https://example.com/it's-fine", 'Bob\'s "page"\nsecond line', 0, 999, 0, 0),
+    ]
+    _, out = _export(tmp_path, bookmarks=bookmarks, quick=None)
+    html = (out / "bookmarks.html").read_text(encoding="utf-8")
+    assert "&#x27;" not in html
+    assert "&#39;" in html
+    for line in html.splitlines():
+        assert line.count("<DT><A") <= 1
+    assert _tree(html) == [
+        ("link", 'Bob\'s "page" second line', "https://example.com/it's-fine"),
+    ]
+
+
 def test_folders_caught_in_a_parent_cycle_are_still_exported(tmp_path):
     bookmarks = [
         (1, None, "A", 1, 2, 0, 0),
@@ -147,6 +185,31 @@ def test_corrupt_database_raises(tmp_path):
     add_category(tmp_path, "SBROWSER", [entry("backup.enc")])
     with pytest.raises(BrowserExportError, match="cannot read"):
         export_browser(tmp_path, tmp_path / "out")
+
+
+def test_corrupt_zip_member_raises_export_error_not_traceback(tmp_path):
+    archive = tmp_path / "SBROWSER" / "backup.enc"
+    archive.parent.mkdir(parents=True)
+    _corrupt_zip_member(archive, "databases/SBrowser.db", os.urandom(4096))
+    add_category(tmp_path, "SBROWSER", [entry("backup.enc")])
+    with pytest.raises(BrowserExportError, match="cannot read"):
+        export_browser(tmp_path, tmp_path / "out")
+
+
+def test_extract_returning_none_for_bookmarks_raises(tmp_path, monkeypatch):
+    import ssba.core.parsers.browser as browser_mod
+
+    scan_dir = build_browser_scan_dir(tmp_path / "scan")
+    real_extract = browser_mod._extract
+
+    def fake_extract(archive, member, tmp):
+        if member == browser_mod._BOOKMARKS_DB:
+            return None
+        return real_extract(archive, member, tmp)
+
+    monkeypatch.setattr(browser_mod, "_extract", fake_extract)
+    with pytest.raises(BrowserExportError, match="no Samsung Internet backup"):
+        export_browser(scan_dir, tmp_path / "out")
 
 
 def test_unwritable_output_raises(tmp_path):
