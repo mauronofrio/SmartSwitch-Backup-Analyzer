@@ -119,7 +119,7 @@ def test_text_cleaner_replaces_only_characters_xml_forbids():
     # A well-formed call log cannot carry these characters, so the shared
     # cleaner is tested directly; the message tests cover it end to end.
     clean = TextCleaner()
-    assert clean("a\x07b\x00c\td\ne\rf￾g") == "a�b�c\td\ne\rf�g"
+    assert clean("a\x07b\x00c\td\ne\rf\uFFFEg") == "a\uFFFDb\uFFFDc\td\ne\rf\uFFFDg"
     assert clean.replaced == 3
 
 

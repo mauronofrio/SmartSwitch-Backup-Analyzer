@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 # Characters XML 1.0 forbids even as character references.
-_INVALID_XML_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿\ud800-\udfff]")
+_INVALID_XML_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\uFFFE\uFFFF\ud800-\udfff]")
 
 
 class TextCleaner:
@@ -18,7 +18,7 @@ class TextCleaner:
         self.replaced = 0
 
     def __call__(self, text: str) -> str:
-        cleaned, count = _INVALID_XML_CHARS.subn("�", text)
+        cleaned, count = _INVALID_XML_CHARS.subn("\uFFFD", text)
         self.replaced += count
         return cleaned
 
