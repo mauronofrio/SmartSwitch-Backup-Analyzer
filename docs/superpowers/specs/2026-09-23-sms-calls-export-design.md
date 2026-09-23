@@ -108,6 +108,7 @@ Out (non-goals):
 src/ssba/core/parsers/
 ├── scan_report.py   # NEW: read report.json, list a category's files safely
 ├── contact.py       # uses scan_report
+├── sbr_xml.py       # NEW: shared XML rules below (clean text, write, side file)
 ├── messages.py      # NEW: Google Messages SQLite -> SMS Backup & Restore XML
 └── calls.py         # NEW: Samsung call_log.exml -> SMS Backup & Restore XML
 src/ssba/cli/main.py # new subcommands: ssba export messages | calls
@@ -167,17 +168,23 @@ src/ssba/cli/main.py # new subcommands: ssba export messages | calls
       with `"\n"`. No text at all → unsupported (`reason: "no text"`).
     - `type`: status 3 → 3 (draft); 8 or 9 → 5 (failed); other 1-99 → 2
       (sent); 100-199 → 1 (received); ≤ 0 → unsupported.
-    - `address`: for received messages, the sender participant; for the
-      others, the conversation's participants that are not self — exactly
-      one is required, otherwise unsupported (`reason: "group or no
-      recipient"`). Value: first non-empty of `send_destination`,
-      `normalized_destination`, `display_destination`; none → unsupported.
+    - `address`: the conversation's participants that are not self —
+      exactly one is required (for received and sent messages alike),
+      otherwise unsupported (`reason: "group or no recipient"`). Value: its
+      first non-empty `send_destination`, `normalized_destination`,
+      `display_destination`; none → unsupported (`reason: "no address"`).
+    - Text columns are decoded as UTF-8 with `surrogateescape`, so invalid
+      bytes never abort the export; they become U+FFFD via the XML rules
+      and are counted.
     - `date`: `received_timestamp`, or `sent_timestamp` if that is 0/NULL;
       both missing → unsupported. `date_sent`: `sent_timestamp` when > 0,
       else omitted.
     - `read`: 1 if the `read` column is truthy, else 0.
     - `contact_name`: that participant's `full_name` when non-empty, else
       omitted.
+    - Attribute order follows the published sample: `protocol`, `address`,
+      `date`, `type`, `body`, `read`, `status`, `locked`, `date_sent`,
+      `contact_name`.
     - Fixed: `protocol="0"`, `status="-1"`, `locked="0"`.
     - `protocol` ≠ 0 in the source (RCS) → counted in `rcs_as_sms`.
   - Root: `<smses count="<exported>">`.
