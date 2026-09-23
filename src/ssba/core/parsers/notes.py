@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import sqlite3
@@ -190,3 +191,129 @@ def read_notes(scan_dir: Path) -> list[Note]:
                 con.close()
     except (OSError, sqlite3.Error) as exc:
         raise NotesExportError(f"cannot read {db}: {exc}") from exc
+
+
+_UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_MAX_NAME = 100
+_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+_PREVIEW_NOTE = "Only a preview of this note's text was kept; it may be cut short."
+_MISSING_DELETED = "Deleted note from the Samsung Notes trash; its file is not in the backup."
+_MISSING = "This note's file is not in the backup."
+_NO_TEXT = "(no text)"
+_HANDWRITING = "(This note contains only handwriting or drawings, which cannot be exported.)"
+
+
+@dataclass
+class NotesExportResult:
+    notes: int = 0
+    text_notes: int = 0
+    preview_only: int = 0
+    attachments: int = 0
+    handwriting_only: int = 0
+    missing_files: int = 0
+    with_drawings: int = 0
+    trashed: int = 0
+
+
+def safe_name(text: str) -> str:
+    """A file or folder name every common file system (Windows included) accepts."""
+    name = _UNSAFE_CHARS.sub("_", text).strip().rstrip(". ")
+    name = name[:_MAX_NAME].rstrip(". ")
+    if not name:
+        return "Untitled"
+    if name.split(".")[0].upper() in _RESERVED:
+        name = "_" + name
+    return name
+
+
+def _plan(note: Note, taken: set[str]) -> tuple[str | None, list[tuple[str, Path]]]:
+    """File names for ``note`` that no other note in the folder uses yet.
+
+    Each note also claims its base name (stored as "<base>/", which no file
+    name can equal), so two notes never look like one: "Doppio.txt" and
+    "Doppio (2).pdf", not "Doppio.txt" and "Doppio.pdf".
+    """
+    base = safe_name(note.title)
+    n = 1
+    while True:
+        stem = base if n == 1 else f"{base} ({n})"
+        marker = stem.lower() + "/"
+        txt = f"{stem}.txt" if note.text is not None or not note.attachments else None
+        files = []
+        for i, source in enumerate(note.attachments):
+            ext = source.suffix.lower()
+            name = f"{stem}{'' if i == 0 else f'_{i + 1}'}{ext}"
+            if txt is not None and name.lower() == txt.lower():
+                name = f"{stem}_attachment{ext}"
+            files.append((name, source))
+        wanted = ([txt] if txt else []) + [name for name, _ in files]
+        if marker not in taken and not any(name.lower() in taken for name in wanted):
+            taken.add(marker)
+            taken.update(name.lower() for name in wanted)
+            return txt, files
+        n += 1
+
+
+def _txt_body(note: Note) -> str:
+    header = []
+    if note.file_missing:
+        header.append(_MISSING_DELETED if note.deleted else _MISSING)
+        header.append(f"Created: {format_time(note.created) or 'unknown'}")
+        header.append(f"Modified: {format_time(note.modified) or 'unknown'}")
+    if note.text_source == "preview":
+        header.append(_PREVIEW_NOTE)
+    if note.text is not None:
+        text = note.text.replace("\r\n", "\n").replace("\r", "\n")
+    else:
+        text = _NO_TEXT if note.file_missing else _HANDWRITING
+    body = text if text.endswith("\n") else text + "\n"
+    return "\n".join(header) + "\n\n" + body if header else body
+
+
+def _set_mtime(path: Path, seconds: float | None) -> None:
+    if seconds:
+        try:
+            os.utime(path, (seconds, seconds))
+        except (OverflowError, ValueError):
+            pass
+
+
+def export_notes(scan_dir: Path, out_dir: Path) -> NotesExportResult:
+    notes = read_notes(scan_dir)
+    if not notes:
+        raise NotesExportError("the Samsung Notes database has no notes")
+
+    result = NotesExportResult()
+    taken_by_folder: dict[tuple[str, ...], set[str]] = {}
+    for note in notes:
+        parts = tuple(safe_name(part) for part in note.folder)
+        folder = out_dir.joinpath(*parts)
+        # Windows folders are case-insensitive: share the used names.
+        taken = taken_by_folder.setdefault(tuple(p.lower() for p in parts), set())
+        txt, files = _plan(note, taken)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if txt is not None:
+                (folder / txt).write_text(_txt_body(note), encoding="utf-8", newline="\n")
+                _set_mtime(folder / txt, note.modified)
+            for name, source in files:
+                shutil.copyfile(source, folder / name)
+                _set_mtime(folder / name, note.modified)
+        except OSError as exc:
+            raise NotesExportError(f"cannot export {note.title!r}: {exc}") from exc
+
+        result.notes += 1
+        result.text_notes += note.text is not None
+        result.preview_only += note.text_source == "preview"
+        result.attachments += len(files)
+        result.handwriting_only += (
+            not note.file_missing and note.text is None and not note.attachments
+        )
+        result.missing_files += note.file_missing
+        result.with_drawings += note.has_drawings
+        result.trashed += note.deleted
+    return result
