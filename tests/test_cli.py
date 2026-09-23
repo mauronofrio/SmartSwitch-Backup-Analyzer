@@ -4,6 +4,7 @@ import json
 
 from ssba.cli.main import run
 from ssba.core.crypto import derive_key
+from tests.blocked_fixtures import build_blocked_scan_dir
 from tests.browser_fixtures import build_browser_scan_dir
 from tests.call_fixtures import build_call_scan_dir
 from tests.clipboard_fixtures import build_clipboard_scan_dir
@@ -11,7 +12,6 @@ from tests.clock_fixtures import build_clock_scan_dir
 from tests.contact_fixtures import build_scan_dir
 from tests.crypto_helpers import encrypt_dummy_ecb, encrypt_iv_prefixed
 from tests.message_fixtures import build_message_scan_dir
-from tests.test_blocked_export import build_blocked_scan_dir
 from tests.wifi_fixtures import build_wifi_scan_dir
 
 FAKE_DUMMY = "AABBCCDDEEFF00112233445566778899AABB"
