@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
+import sys
 
-from ssba.cli.main import run
+import pytest
+
+from ssba.cli.main import main, run
 from ssba.core.crypto import derive_key
 from tests.blocked_fixtures import build_blocked_scan_dir
 from tests.browser_fixtures import build_browser_scan_dir
@@ -333,6 +337,24 @@ def test_export_notes_success(tmp_path, capsys):
 def test_export_notes_error(tmp_path, capsys):
     assert run(["export", "notes", str(tmp_path), "--out", str(tmp_path / "n")]) == 1
     assert capsys.readouterr().err.startswith("error: report.json not found")
+
+
+def test_main_reconfigures_stderr_so_emoji_in_an_error_does_not_crash(tmp_path, monkeypatch):
+    scan_dir = tmp_path / "\U0001f4dd notes"
+    out = tmp_path / "notes"
+    monkeypatch.setattr(
+        sys, "argv", ["ssba", "export", "notes", str(scan_dir), "--out", str(out)]
+    )
+    buffer = io.BytesIO()
+    stderr = io.TextIOWrapper(buffer, encoding="cp1252")
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    with pytest.raises(SystemExit):
+        main()
+
+    stderr.flush()
+    data = buffer.getvalue()
+    assert b"\\U0001f4dd" in data or "\U0001f4dd".encode("utf-8") in data
 
 
 def test_export_all_includes_notes(tmp_path, capsys):

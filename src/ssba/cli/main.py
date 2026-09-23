@@ -306,4 +306,7 @@ def run(argv: list[str] | None = None) -> int:
 
 
 def main() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     sys.exit(run())
