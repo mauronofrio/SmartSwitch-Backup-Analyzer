@@ -114,28 +114,41 @@ src/ssba/cli/main.py             # export files --mode, export apps, export all 
 ### `files` — placing (`export_files(scan_dir, out_dir, mode)`)
 
 - `mode` is `"copy"` or `"move"`; anything else → `ValueError`.
-- Before placing anything: `out_dir` must not equal, sit inside, or contain
-  any scanned category folder (`Path.resolve()` on both sides, then
-  `is_relative_to` each way) — otherwise a planned target could resolve to
-  its own source, and `move` would delete the only copy. Violation →
-  `FilesExportError("the output folder must not be inside or contain a
-  scanned category folder: …")`.
+- Before placing anything: `out_dir` must not overlap any scanned category
+  folder, checked two ways, since path-string comparison alone (even
+  `resolve()`-based) cannot reliably tell a real self-reference apart from a
+  same-file alias reached through a different spelling (an 8.3 short name, a
+  directory junction, a symlinked ancestor, a UNC loopback path, ...):
+  - nominal: `Path.resolve()` on both sides, then `is_relative_to` each way
+    (cheap, catches most cases without touching the filesystem);
+  - same-file: `os.path.samefile` along whichever side's ancestors actually
+    exist — `out_dir` overlaps a category folder if any existing ancestor of
+    `out_dir` (including `out_dir` itself, if it exists) is `samefile` with
+    the category folder, or any ancestor of the category folder (including
+    itself — always exists, since the category folder does) is `samefile`
+    with `out_dir` (checked only when `out_dir` exists).
+  Either way → `FilesExportError("the output folder must not be inside or
+  contain a scanned category folder: …")`.
 - For each planned file, target = `out_dir / <target path>`:
   - a candidate name that is a symlink is never followed or trusted — it is
     always treated as occupied (the numbered-copy search moves on);
   - target exists and is the very same file as the source
-    (`os.path.samefile`) — two cases, distinguished by comparing
-    `os.path.normcase(os.path.abspath(...))` of both paths:
-    - the paths are literally the same → `FilesExportError` (defense in
-      depth for the overlap case above, even if it somehow wasn't caught up
-      front); nothing is deleted;
-    - the paths differ → a hard link an earlier, interrupted `move` left
-      behind (its `os.link(source, candidate)` succeeded but removing the
-      source then failed — e.g. a read-only source — or the process
-      stopped). The bytes are already safe at the target: in `move` mode
-      the source is removed (counted in `already_present`, not treated as
-      the overlap error); in `copy` mode nothing changes (also
-      `already_present`);
+    (`os.path.samefile`) — two cases, distinguished by `os.stat(source).st_nlink`
+    and whether source and candidate are the same directory entry
+    (`os.path.samefile(source.parent, candidate.parent)` and
+    `source.name.casefold() == candidate.name.casefold()`), never by
+    comparing path strings:
+    - `st_nlink >= 2` and they are *not* the same directory entry → a second
+      hard link an earlier, interrupted `move` left behind (its
+      `os.link(source, candidate)` succeeded but removing the source then
+      failed — e.g. a read-only source — or the process stopped). The bytes
+      are already safe at the target: in `move` mode the source is removed
+      (counted in `already_present`, not treated as the overlap error); in
+      `copy` mode nothing changes (also `already_present`);
+    - anything else — a single-link file (`st_nlink == 1`), or literally the
+      same directory entry — means `out_dir` resolves back onto its own
+      source (the up-front check above somehow didn't catch it) →
+      `FilesExportError`; nothing is deleted;
   - target exists and is identical (same size and same SHA-256) → nothing is
     written; in `move` mode the source is deleted. Counted in `merged` when
     the target was placed earlier in this run (a backup duplicate), else in
@@ -147,24 +160,28 @@ src/ssba/cli/main.py             # export files --mode, export apps, export all 
     directly: `move` first tries a direct `os.link(source, candidate)`
     (falling back to the copy path below only across volumes or where hard
     links aren't supported); `copy`, and that fallback, stage the bytes in a
-    uniquely-named, exclusively-created (`"xb"`) partial file in the same
-    folder — `.{name}.{uuid4().hex}.ssba-partial`, filled with
-    `shutil.copyfileobj`, so staging never deletes or reuses a real file a
-    person or another process left with a similar name — then commit with a
-    no-clobber `os.link(partial, candidate)` followed by dropping the
-    partial name (or `os.rename` when the filesystem has no hard links,
-    with a `FileExistsError` from that `os.rename` — how Windows reports a
-    concurrently-claimed name — handled the same way as from `os.link`;
-    without hard-link support a narrow race remains on POSIX, where
-    `os.rename` replaces a file created at that exact instant instead of
-    failing). A name claimed by someone else in between (`FileExistsError`
+    short, fixed-length, exclusively-created (`"xb"`) partial file in the
+    same folder — `.ssba-<8 hex>.partial`, unrelated to the original name (so
+    staging can't push a long filename past the filesystem's path-length
+    limit), filled with `shutil.copyfileobj`. Only the call that actually
+    created the partial (its `open(..., "xb")` succeeded) may ever delete it
+    — a name collision with an unrelated, pre-existing file must never
+    delete that file; on such a collision the failure propagates as
+    `FilesExportError` rather than staging succeeding by chance. Once
+    staged, commit with a no-clobber `os.link(partial, candidate)` followed
+    by dropping the partial name (or `os.rename` when the filesystem has no
+    hard links, with a `FileExistsError` from that `os.rename` — how Windows
+    reports a concurrently-claimed name — handled the same way as from
+    `os.link`; without hard-link support a narrow race remains on POSIX,
+    where `os.rename` replaces a file created at that exact instant instead
+    of failing). A name claimed by someone else in between (`FileExistsError`
     from `os.link` or that `os.rename`) is treated like any other occupied
     candidate: the search moves to the next numbered name, and the partial
     is removed.
   Existing files are never overwritten, and an interruption never leaves a
-  truncated file under a final name — at most a hidden, uniquely-named
-  `.ssba-partial` file, removed on a handled failure and otherwise inert
-  (never reused, since the next run picks a fresh name).
+  truncated file under a final name — at most a hidden, short-named
+  `.ssba-<hex>.partial` file, removed on a handled failure and otherwise
+  inert (never reused, since the next run picks a fresh name).
 - A source removal (after a hard link, after an identity match, after a
   copy-fallback commit) uses a helper that clears a Windows read-only bit
   and retries once if the plain delete raises `PermissionError`, so a
@@ -239,11 +256,23 @@ Fabricated category folders, manifests and files only.
   existence check and the commit is not overwritten; a symlinked target is
   treated as occupied (skipped on platforms that cannot create symlinks
   without privilege); a read-only source is still moved; a hard link left
-  by an interrupted move (`samefile` true, paths differ) resumes as
-  `already_present` in both modes rather than raising the overlap error; an
-  existing file that happens to be named like a partial is left untouched;
-  a `FileExistsError` from the no-hard-link `os.rename` fallback is treated
-  as a taken name, with no partial left behind.
+  by an interrupted move (`samefile` true, `st_nlink >= 2`, not the same
+  directory entry) resumes as `already_present` in both modes rather than
+  raising the overlap error; an existing file that happens to be named like
+  a partial is left untouched; a `FileExistsError` from the no-hard-link
+  `os.rename` fallback is treated as a taken name, with no partial left
+  behind; `out_dir` reached through a directory junction pointing at a
+  category folder is rejected (skipped if junctions can't be created without
+  elevation); the up-front overlap check's `samefile`-based branch is
+  reachable and raises (a portable stand-in, forcing `os.path.samefile`
+  true, for an alias `resolve()` cannot normalize away, e.g. a UNC loopback
+  path); a differently-spelled alias of the source (a parent `..`
+  round-trip that `os.path.abspath` normalizes) is recognized as a real
+  self-reference and raises without deleting the single-link source; a
+  forced `samefile` match on a genuinely single-link file also raises,
+  isolating the `st_nlink == 1` branch specifically; the partial name is
+  short and fixed-length; a name collision with an unrelated pre-existing
+  partial-like file never deletes that file.
 - Apps: sorting, fallbacks, skipped items, link escaping, page escaping,
   errors.
 - CLI: `files` each mode, `apps`, `export all` with default `none` and with
@@ -260,13 +289,21 @@ source, 16,231 dated; 129 apps.
 - `move` only ever deletes a source after it has been moved or proven
   identical to the file already at the target. Existing output files are never
   overwritten, and no write ever lands under a final name until it is
-  complete (staged in a uniquely-named, exclusively-created
-  `.{name}.{hex}.ssba-partial` file, committed with a no-clobber hard link —
-  never a fixed name, so staging never touches an unrelated file that
-  happens to look like a partial). `out_dir` is checked up front against
-  every scanned category folder so a target can never resolve to its own
-  source; `_place` also tells that real self-reference apart from a hard
-  link an interrupted move left behind (same file, different path), and a
-  source removal survives a Windows read-only source.
+  complete (staged in a short, fixed-length, exclusively-created
+  `.ssba-<hex>.partial` file — not derived from the target's name, so long
+  filenames stay stageable — committed with a no-clobber hard link; only the
+  call that actually created the partial may delete it, so a name collision
+  with an unrelated file never deletes that file). `out_dir` is checked up
+  front against every scanned category folder, both nominally
+  (`resolve()`/`is_relative_to`) and via `os.path.samefile` along each
+  side's ancestors, so a target can never resolve to its own source even
+  through an alias `resolve()` doesn't normalize away (an 8.3 short name, a
+  directory junction, a symlinked ancestor, a UNC loopback path). `_place`
+  tells that same kind of real self-reference apart from a hard link an
+  interrupted move left behind by `os.stat(source).st_nlink` (>= 2 only for
+  a genuine second link) together with whether source and candidate are the
+  same directory entry — never by comparing path strings, which cannot be
+  trusted to catch every alias. A source removal survives a Windows
+  read-only source.
 - No real personal data in the repository, tests or fixtures.
 - No attribution lines in commits; nothing pushed; work on `master`.

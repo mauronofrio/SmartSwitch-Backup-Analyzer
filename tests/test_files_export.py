@@ -3,11 +3,13 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from ssba.core.parsers.files import FilesExportError, export_files
+from ssba.core.parsers import files as files_module
+from ssba.core.parsers.files import FilesExportError, _new_partial_name, _place, export_files
 from tests.files_fixtures import FILES, T, build_files_scan_dir
 
 TREE = sorted([
@@ -146,14 +148,16 @@ def test_same_size_but_different_content_is_kept_as_a_numbered_copy_in_move_mode
 
 
 def test_an_interrupted_copy_leaves_no_file_at_the_final_name(tmp_path, monkeypatch):
-    # Staging fills a uniquely-named partial via shutil.copyfileobj on manually
-    # opened handles, so the interruption is simulated at that level.
+    # Staging fills a short, randomly-named partial via shutil.copyfileobj on
+    # manually opened handles, so the interruption is simulated at that level,
+    # matched on the *source* handle's name (the partial name no longer encodes
+    # the original filename).
     scan_dir = build_files_scan_dir(tmp_path / "scan")
     out = tmp_path / "out"
     real_copyfileobj = shutil.copyfileobj
 
     def flaky_copyfileobj(fsrc, fdst, length=1024 * 1024):
-        if "a.jpg" in Path(fdst.name).name:
+        if "a.jpg" in Path(fsrc.name).name:
             fdst.write(b"x")  # a truncated write, then the failure
             raise OSError("simulated interruption")
         return real_copyfileobj(fsrc, fdst, length)
@@ -163,7 +167,7 @@ def test_an_interrupted_copy_leaves_no_file_at_the_final_name(tmp_path, monkeypa
         export_files(scan_dir, out, "copy")
     assert not (out / "DCIM/Camera/a.jpg").exists()
     assert (scan_dir / "Photo/DCIM/Camera/a.jpg").exists()
-    assert not list(out.rglob("*ssba-partial*"))  # cleaned up after the failed fill
+    assert not list(out.rglob("*.partial"))  # cleaned up after the failed fill
 
     monkeypatch.setattr(shutil, "copyfileobj", real_copyfileobj)
     export_files(scan_dir, out, "copy")
@@ -249,7 +253,7 @@ def test_a_hard_link_left_by_an_interrupted_move_resumes_cleanly(tmp_path, mode)
 def test_an_existing_partial_named_file_is_left_alone(tmp_path):
     scan_dir = build_files_scan_dir(tmp_path / "scan")
     out = tmp_path / "out"
-    stray = out / "DCIM/Camera/a.jpg.ssba-partial"
+    stray = out / "DCIM/Camera/.ssba-cafefeed.partial"  # looks like our staging convention
     stray.parent.mkdir(parents=True)
     stray.write_bytes(b"do not touch")
 
@@ -282,4 +286,99 @@ def test_a_rename_collision_in_the_no_hard_link_fallback_tries_the_next_name(tmp
 
     assert not (out / "DCIM/Camera/a.jpg").exists()
     assert (out / "DCIM/Camera/a (2).jpg").read_bytes() == b"photo-a"
-    assert not list(out.rglob("*ssba-partial*"))
+    assert not list(out.rglob("*.partial"))
+
+
+def test_out_dir_reached_via_a_junction_is_rejected(tmp_path):
+    # A directory junction is a different spelling of the same directory entry
+    # that Path.resolve() does not necessarily normalize away; os.path.samefile
+    # (NTFS file-index based) recognizes it regardless.
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    junction = tmp_path / "junction_to_photo"
+    target = scan_dir / "Photo"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        pytest.skip("cannot create a directory junction in this environment")
+    try:
+        with pytest.raises(FilesExportError, match="output folder"):
+            export_files(scan_dir, junction, "move")
+        _assert_sources_untouched(scan_dir)
+    finally:
+        # rmdir on a junction removes only the link, never its target's contents.
+        try:
+            junction.rmdir()
+        except OSError:
+            pass
+
+
+def test_check_no_overlap_raises_via_a_monkeypatched_samefile_alias(tmp_path, monkeypatch):
+    # Portable stand-in for an alias resolve() misses (UNC loopback, 8.3 short
+    # names, ...): force os.path.samefile True and confirm the up-front guard's
+    # samefile-based branch (not just the resolve()/is_relative_to one) is wired
+    # in and raises rather than proceeding.
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "unrelated_out"
+    out.mkdir()
+
+    monkeypatch.setattr(os.path, "samefile", lambda a, b: True)
+    with pytest.raises(FilesExportError, match="output folder"):
+        export_files(scan_dir, out, "move")
+    _assert_sources_untouched(scan_dir)
+
+
+def test_place_raises_for_a_differently_spelled_alias_of_the_source(tmp_path):
+    # source.parent / ".." / source.parent.name / source.name is the same file as
+    # source, just spelled through a parent round-trip that os.path.abspath
+    # normalizes away -- a portable stand-in for an 8.3 short name, a junction,
+    # or a UNC loopback path aliasing the real one. There is only one link
+    # (st_nlink == 1): this must raise, never delete the only copy.
+    source = tmp_path / "scan" / "Photo" / "a.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"photo-a")
+    candidate_alias = source.parent / ".." / source.parent.name / source.name
+
+    with pytest.raises(FilesExportError, match="output folder"):
+        _place(source, candidate_alias, "move", set())
+    assert source.read_bytes() == b"photo-a"
+
+
+def test_place_raises_when_samefile_is_true_and_nlink_is_one(tmp_path, monkeypatch):
+    # Force os.path.samefile True for a genuinely single-link file at a different
+    # parent and a different name (so the same-directory-entry check is false for
+    # an unrelated reason, isolating the st_nlink == 1 path specifically).
+    source = tmp_path / "scan" / "Photo" / "a.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"photo-a")
+    candidate = tmp_path / "out" / "other.jpg"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"unrelated bytes")
+
+    monkeypatch.setattr(os.path, "samefile", lambda a, b: True)
+    with pytest.raises(FilesExportError, match="output folder"):
+        _place(source, candidate, "move", set())
+    assert source.read_bytes() == b"photo-a"
+    assert candidate.read_bytes() == b"unrelated bytes"
+
+
+def test_the_partial_name_is_short_and_fixed_length(tmp_path):
+    name = _new_partial_name()
+    assert name.startswith(".ssba-")
+    assert name.endswith(".partial")
+    assert len(name) < 30
+
+
+def test_a_partial_name_collision_never_deletes_the_existing_file(tmp_path, monkeypatch):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+    camera_dir = out / "DCIM" / "Camera"
+    camera_dir.mkdir(parents=True)
+    stray = camera_dir / ".ssba-deadbeef.partial"
+    stray.write_bytes(b"do not touch")
+
+    monkeypatch.setattr(files_module, "_new_partial_name", lambda: stray.name)
+    with pytest.raises(FilesExportError):
+        export_files(scan_dir, out, "copy")
+    assert stray.read_bytes() == b"do not touch"

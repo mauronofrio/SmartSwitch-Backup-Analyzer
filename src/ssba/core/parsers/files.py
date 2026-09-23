@@ -176,9 +176,16 @@ def _candidates(target: Path):
         n += 1
 
 
-def _same_path(a: Path, b: Path) -> bool:
-    """True only when ``a`` and ``b`` name the very same path (not just the same file)."""
-    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+def _is_same_entry(a: Path, b: Path) -> bool:
+    """True when ``a`` and ``b`` are the very same directory entry: the same parent
+    directory and the same name (case-insensitively) -- not just the same file
+    reached through a different alias (a second hard link, a junction, an 8.3
+    short name, a UNC loopback path, a symlinked ancestor, ...). Path-string
+    comparison (even ``resolve()``-based) cannot be trusted to tell these apart,
+    since not every alias normalizes to the same string; ``os.path.samefile``
+    (file-index based) can.
+    """
+    return os.path.samefile(a.parent, b.parent) and a.name.casefold() == b.name.casefold()
 
 
 def _remove(path: Path) -> None:
@@ -188,6 +195,11 @@ def _remove(path: Path) -> None:
     except PermissionError:
         os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
         path.unlink()
+
+
+def _new_partial_name() -> str:
+    """A short, fixed-length staging name, independent of the file it will hold."""
+    return f".ssba-{uuid.uuid4().hex[:8]}.partial"
 
 
 def _commit(source: Path, candidate: Path, mode: str) -> bool:
@@ -210,15 +222,21 @@ def _commit(source: Path, candidate: Path, mode: str) -> bool:
             return True
 
     # Never write straight to ``candidate``, and never delete an existing file to
-    # make room for staging: fill a uniquely-named, exclusively-created partial
-    # file, then commit it with a no-clobber ``os.link`` (it fails instead of
-    # overwriting) followed by dropping the partial name.
-    partial = candidate.with_name(f".{candidate.name}.{uuid.uuid4().hex}.ssba-partial")
+    # make room for staging: fill a short, randomly-named, exclusively-created
+    # partial file (its name does not encode ``candidate``'s, so this can't push
+    # a long filename past the filesystem's path-length limit), then commit it
+    # with a no-clobber ``os.link`` (it fails instead of overwriting) followed by
+    # dropping the partial name.
+    partial = candidate.parent / _new_partial_name()
+    created = False  # only unlink the partial below if this call is the one that
+    # made it -- a name collision with an unrelated, pre-existing file must never
+    # delete that file.
     try:
         with source.open("rb") as src, partial.open("xb") as dst:
+            created = True
             shutil.copyfileobj(src, dst)
     except BaseException:
-        if partial.exists():
+        if created:
             partial.unlink()
         raise
     try:
@@ -259,18 +277,23 @@ def _place(source: Path, target: Path, mode: str, placed_now: set[Path]) -> tupl
             continue
         if candidate.exists():
             if os.path.samefile(source, candidate):
-                if _same_path(source, candidate):
-                    raise FilesExportError(
-                        "the output folder must not be inside or contain a scanned "
-                        f"category folder: {candidate} is {source}"
-                    )
-                # Same bytes, different names: a hard link a previous, interrupted
-                # move left behind (os.link succeeded, then removing the source
-                # failed or the process stopped). The data is already safe at
-                # ``candidate``; just finish cleaning up the source in move mode.
-                if mode == "move":
-                    _remove(source)
-                return "present", candidate
+                # Only trust this as "a hard link a previous, interrupted move left
+                # behind" (its os.link succeeded, then removing the source failed or
+                # the process stopped) when there really are >= 2 links to the data
+                # AND source/candidate are not literally the same directory entry.
+                # Path-string comparison (even resolve()-based) cannot reliably tell
+                # a real self-reference apart from an alias (8.3 short name,
+                # junction, UNC loopback, symlinked ancestor, ...); st_nlink can.
+                # Anything else -- a single-link file, or the same entry -- means
+                # out_dir resolves back onto its own source: never delete.
+                if os.stat(source).st_nlink >= 2 and not _is_same_entry(source, candidate):
+                    if mode == "move":
+                        _remove(source)
+                    return "present", candidate
+                raise FilesExportError(
+                    "the output folder must not be inside or contain a scanned "
+                    f"category folder: {candidate} is {source}"
+                )
             if candidate.is_file() and _identical(source, candidate):
                 if mode == "move":
                     _remove(source)  # only after proving the target holds the same bytes
@@ -303,19 +326,42 @@ def _remove_empty_dirs(root: Path) -> None:
             pass  # not empty
 
 
+def _ancestors(path: Path):
+    """``path`` itself, then each of its parent directories, closest first."""
+    yield path
+    yield from path.parents
+
+
 def _check_no_overlap(scan_dir: Path, out_dir: Path, categories: list[str]) -> None:
-    """Refuse an ``out_dir`` that would make a planned target equal its own source."""
+    """Refuse an ``out_dir`` that would make a planned target equal its own source.
+
+    Checked two ways: a nominal overlap via ``resolve()``/``is_relative_to`` (cheap,
+    catches most cases without touching the filesystem), and a same-file overlap
+    reached through a different spelling of the same directory -- an 8.3 short
+    name, a directory junction, a symlinked ancestor, a UNC loopback path, etc. --
+    via ``os.path.samefile`` along whichever side's ancestors actually exist
+    (``resolve()`` does not reliably normalize every such alias away).
+    """
     out_resolved = out_dir.resolve()
-    for category in categories:
-        cat_resolved = (scan_dir / category).resolve()
+    out_exists = out_dir.exists()
+
+    def overlap(cat_dir: Path, cat_resolved: Path) -> bool:
         if (
             out_resolved == cat_resolved
             or out_resolved.is_relative_to(cat_resolved)
             or cat_resolved.is_relative_to(out_resolved)
         ):
+            return True
+        if any(a.exists() and os.path.samefile(a, cat_dir) for a in _ancestors(out_dir)):
+            return True
+        return out_exists and any(os.path.samefile(a, out_dir) for a in _ancestors(cat_dir))
+
+    for category in categories:
+        cat_dir = scan_dir / category
+        if overlap(cat_dir, cat_dir.resolve()):
             raise FilesExportError(
                 "the output folder must not be inside or contain a scanned "
-                f"category folder: {cat_resolved}"
+                f"category folder: {cat_dir}"
             )
 
 
