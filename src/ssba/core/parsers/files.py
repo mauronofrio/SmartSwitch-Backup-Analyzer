@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -135,3 +137,106 @@ def plan_files(scan_dir: Path) -> FilesPlan:
         PlannedFile(source, rel, False, dates.get(rel.as_posix().casefold())) for source, rel in storage
     ] + originals
     return plan
+
+
+_MAX_TIME = 253402300800  # 9999-12-31: os.utime rejects later times on Windows
+
+
+@dataclass
+class FilesExportResult:
+    placed: int = 0
+    merged: int = 0
+    already_present: int = 0
+    conflicts: int = 0
+    originals: int = 0
+    dated: int = 0
+    missing: int = 0
+    bad_manifests: int = 0
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _identical(a: Path, b: Path) -> bool:
+    return a.stat().st_size == b.stat().st_size and _sha256(a) == _sha256(b)
+
+
+def _candidates(target: Path):
+    yield target
+    n = 2
+    while True:
+        yield target.with_name(f"{target.stem} ({n}){target.suffix}")
+        n += 1
+
+
+def _place(source: Path, target: Path, mode: str, placed_now: set[Path]) -> tuple[str, Path]:
+    """Put ``source`` at ``target`` (or a numbered free name), never overwriting.
+
+    Returns ("placed" | "conflict" | "merged" | "present", final path).
+    """
+    conflict = False
+    for candidate in _candidates(target):
+        if not candidate.exists():
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            if mode == "move":
+                shutil.move(str(source), str(candidate))
+            else:
+                shutil.copyfile(source, candidate)
+            placed_now.add(candidate)
+            return ("conflict" if conflict else "placed"), candidate
+        if candidate.is_file() and _identical(source, candidate):
+            if mode == "move":
+                source.unlink()  # only after proving the target holds the same bytes
+            return ("merged" if candidate in placed_now else "present"), candidate
+        conflict = True
+    raise AssertionError("unreachable")
+
+
+def _set_mtime(path: Path, seconds: float | None) -> bool:
+    if seconds is None or not 0 < seconds < _MAX_TIME:
+        return False
+    try:
+        os.utime(path, (seconds, seconds))
+    except OSError:
+        return False
+    return True
+
+
+def _remove_empty_dirs(root: Path) -> None:
+    for dirpath, _, _ in os.walk(root, topdown=False):
+        try:
+            Path(dirpath).rmdir()
+        except OSError:
+            pass  # not empty
+
+
+def export_files(scan_dir: Path, out_dir: Path, mode: str) -> FilesExportResult:
+    if mode not in ("copy", "move"):
+        raise ValueError(f"unknown mode {mode!r}: expected 'copy' or 'move'")
+    plan = plan_files(scan_dir)
+    result = FilesExportResult(missing=plan.missing, bad_manifests=plan.bad_manifests)
+    placed_now: set[Path] = set()
+    for item in plan.files:
+        target = out_dir.joinpath(*item.target.parts)
+        try:
+            status, final = _place(item.source, target, mode, placed_now)
+        except OSError as exc:
+            raise FilesExportError(f"cannot {mode} {item.source}: {exc}") from exc
+        if status in ("placed", "conflict"):
+            result.placed += 1
+            result.conflicts += status == "conflict"
+            result.originals += item.original
+            result.dated += _set_mtime(final, item.mtime)
+        elif status == "merged":
+            result.merged += 1
+        else:
+            result.already_present += 1
+    if mode == "move":
+        for category in plan.categories:
+            _remove_empty_dirs(scan_dir / category)
+    return result
