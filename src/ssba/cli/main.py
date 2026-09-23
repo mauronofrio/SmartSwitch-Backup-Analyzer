@@ -8,7 +8,9 @@ import sys
 from pathlib import Path
 
 from ssba.core.errors import UnsupportedBackupError
+from ssba.core.parsers.calls import CallExportError, export_calls
 from ssba.core.parsers.contact import ContactExportError, export_contacts
+from ssba.core.parsers.messages import MessageExportError, export_messages
 from ssba.core.scanner import scan_backup
 
 
@@ -53,6 +55,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--out", type=Path, required=True, help="path of the .vcf file to write"
     )
 
+    messages_parser = export_kinds.add_parser(
+        "messages", help="write the recovered text messages as SMS Backup & Restore XML"
+    )
+    messages_parser.add_argument(
+        "scan_dir", type=Path, help="directory written by `ssba scan --out`"
+    )
+    messages_parser.add_argument(
+        "--out", type=Path, required=True, help="path of the .xml file to write"
+    )
+    calls_parser = export_kinds.add_parser(
+        "calls", help="write the recovered call log as SMS Backup & Restore XML"
+    )
+    calls_parser.add_argument(
+        "scan_dir", type=Path, help="directory written by `ssba scan --out`"
+    )
+    calls_parser.add_argument(
+        "--out", type=Path, required=True, help="path of the .xml file to write"
+    )
+
     return parser
 
 
@@ -70,6 +91,46 @@ def _run_export_contacts(scan_dir: Path, out: Path) -> int:
             f"{result.unparsed} contacts could not be parsed; "
             f"kept unchanged in {result.unparsed_path}"
         )
+    return 0
+
+
+def _run_export_messages(scan_dir: Path, out: Path) -> int:
+    try:
+        result = export_messages(scan_dir, out)
+    except MessageExportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"{result.exported} messages written to {out}")
+    if result.rcs_as_sms:
+        print(f"{result.rcs_as_sms} RCS messages converted to SMS")
+    if result.system_skipped:
+        print(f"{result.system_skipped} system messages skipped")
+    if result.unsupported:
+        print(
+            f"{result.unsupported} messages could not be converted; "
+            f"kept in {result.unsupported_path}"
+        )
+    if result.replaced_chars:
+        print(f"{result.replaced_chars} invalid characters replaced")
+    return 0
+
+
+def _run_export_calls(scan_dir: Path, out: Path) -> int:
+    try:
+        result = export_calls(scan_dir, out)
+    except CallExportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"{result.exported} calls written to {out}")
+    if result.unknown_types:
+        print(f"{result.unknown_types} calls have an unknown type (kept as is)")
+    if result.unsupported:
+        print(
+            f"{result.unsupported} calls could not be converted; "
+            f"kept in {result.unsupported_path}"
+        )
+    if result.replaced_chars:
+        print(f"{result.replaced_chars} invalid characters replaced")
     return 0
 
 
@@ -107,6 +168,12 @@ def run(argv: list[str] | None = None) -> int:
 
     if args.command == "export" and args.export_kind == "contacts":
         return _run_export_contacts(args.scan_dir, args.out)
+
+    if args.command == "export" and args.export_kind == "messages":
+        return _run_export_messages(args.scan_dir, args.out)
+
+    if args.command == "export" and args.export_kind == "calls":
+        return _run_export_calls(args.scan_dir, args.out)
 
     return 1
 

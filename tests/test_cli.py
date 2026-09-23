@@ -4,8 +4,10 @@ import json
 
 from ssba.cli.main import run
 from ssba.core.crypto import derive_key
+from tests.call_fixtures import build_call_scan_dir
 from tests.contact_fixtures import build_scan_dir
 from tests.crypto_helpers import encrypt_dummy_ecb, encrypt_iv_prefixed
+from tests.message_fixtures import build_message_scan_dir
 
 FAKE_DUMMY = "AABBCCDDEEFF00112233445566778899AABB"
 KEY = derive_key(FAKE_DUMMY)
@@ -140,3 +142,63 @@ def test_export_contacts_missing_report(tmp_path, capsys):
 
     assert exit_code == 1
     assert "report.json" in capsys.readouterr().err
+
+
+def test_export_messages_success(tmp_path, capsys):
+    scan_dir = build_message_scan_dir(tmp_path / "scan")
+    out = tmp_path / "sms.xml"
+
+    exit_code = run(["export", "messages", str(scan_dir), "--out", str(out)])
+
+    assert exit_code == 0
+    assert out.is_file()
+    printed = capsys.readouterr().out
+    assert f"3 messages written to {out}" in printed
+    assert "1 RCS messages converted to SMS" in printed
+    assert "1 system messages skipped" in printed
+    assert f"1 messages could not be converted; kept in {tmp_path / 'sms_unsupported.json'}" in printed
+    assert "invalid characters" not in printed
+
+
+def test_export_messages_missing_report(tmp_path, capsys):
+    exit_code = run(["export", "messages", str(tmp_path), "--out", str(tmp_path / "s.xml")])
+    assert exit_code == 1
+    assert capsys.readouterr().err.startswith("error: report.json not found")
+
+
+def test_export_messages_unwritable_out(tmp_path, capsys):
+    scan_dir = build_message_scan_dir(tmp_path / "scan")
+    out = tmp_path / "sms.xml"
+    out.mkdir()
+    exit_code = run(["export", "messages", str(scan_dir), "--out", str(out)])
+    assert exit_code == 1
+    assert capsys.readouterr().err.startswith("error: cannot write")
+
+
+def test_export_calls_success(tmp_path, capsys):
+    scan_dir = build_call_scan_dir(tmp_path / "scan")
+    out = tmp_path / "calls.xml"
+
+    exit_code = run(["export", "calls", str(scan_dir), "--out", str(out)])
+
+    assert exit_code == 0
+    assert out.is_file()
+    printed = capsys.readouterr().out
+    assert f"5 calls written to {out}" in printed
+    assert "unknown type" not in printed
+    assert "could not be converted" not in printed
+
+
+def test_export_calls_missing_report(tmp_path, capsys):
+    exit_code = run(["export", "calls", str(tmp_path), "--out", str(tmp_path / "c.xml")])
+    assert exit_code == 1
+    assert capsys.readouterr().err.startswith("error: report.json not found")
+
+
+def test_export_calls_unwritable_out(tmp_path, capsys):
+    scan_dir = build_call_scan_dir(tmp_path / "scan")
+    out = tmp_path / "calls.xml"
+    out.mkdir()
+    exit_code = run(["export", "calls", str(scan_dir), "--out", str(out)])
+    assert exit_code == 1
+    assert capsys.readouterr().err.startswith("error: cannot write")
