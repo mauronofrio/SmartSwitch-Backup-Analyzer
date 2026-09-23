@@ -21,6 +21,10 @@ def derive_key(session_dummy: str) -> bytes:
 def decrypt_iv_prefixed(raw: bytes, key: bytes) -> bytes:
     """Decrypt a Smart Switch payload: first 16 bytes are the IV, the rest
     is AES-128-CBC ciphertext (truncated to a whole number of blocks).
+
+    Real backups use PKCS#7 padding, which is removed. It is kept when it is
+    not valid PKCS#7 (some apps zero-pad instead) or when the ciphertext was
+    cut off, since then the last whole block is not the real last block.
     """
     if len(raw) < 32:
         raise ValueError("payload too small to contain an IV and ciphertext")
@@ -31,7 +35,12 @@ def decrypt_iv_prefixed(raw: bytes, key: bytes) -> bytes:
     if not ciphertext:
         raise ValueError("no AES-block-aligned ciphertext after the IV")
     cipher = AES.new(key, AES.MODE_CBC, iv)
-    return cipher.decrypt(ciphertext)
+    plaintext = cipher.decrypt(ciphertext)
+    if aligned_len == len(raw) - 16:
+        pad_len = plaintext[-1]
+        if 1 <= pad_len <= 16 and plaintext.endswith(bytes([pad_len]) * pad_len):
+            return plaintext[:-pad_len]
+    return plaintext
 
 
 def decrypt_dummy_ecb(ciphertext_hex: str) -> str:

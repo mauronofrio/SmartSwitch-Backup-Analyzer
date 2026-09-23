@@ -186,8 +186,8 @@ def test_scan_category_encrypted_docx_preserved_as_opaque_file(tmp_path):
 
     docx_out_path = out_dir / "CATEGORY_G" / "invoice.docx"
     assert docx_out_path.is_file(), "expected the decrypted .docx to be written as a single file"
-    # The scanner's AES-CBC decryption zero-pads to a 16-byte block boundary
-    # and doesn't strip that padding (it's not reversible in general for
+    # This fixture is zero-padded to a 16-byte block boundary, and decryption
+    # doesn't strip zero padding (it's not reversible in general for
     # arbitrary binary content), so the written bytes are the original zip
     # plus trailing null padding - harmless to zip readers, which stop at
     # the end-of-central-directory record. Verify via the prefix and by

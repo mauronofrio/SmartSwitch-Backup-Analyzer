@@ -5,7 +5,11 @@ import hashlib
 import pytest
 
 from ssba.core.crypto import decrypt_dummy_ecb, decrypt_iv_prefixed, derive_key
-from tests.crypto_helpers import encrypt_dummy_ecb, encrypt_iv_prefixed
+from tests.crypto_helpers import (
+    encrypt_dummy_ecb,
+    encrypt_iv_prefixed,
+    encrypt_iv_prefixed_pkcs7,
+)
 
 FAKE_DUMMY = "AABBCCDDEEFF00112233445566778899AABB"
 
@@ -28,6 +32,34 @@ def test_decrypt_iv_prefixed_round_trip():
 def test_decrypt_iv_prefixed_rejects_too_short_payload():
     with pytest.raises(ValueError):
         decrypt_iv_prefixed(b"short", b"0" * 16)
+
+
+@pytest.mark.parametrize("length", [0, 1, 15, 16, 17, 47])
+def test_decrypt_iv_prefixed_strips_pkcs7_padding(length):
+    key = derive_key(FAKE_DUMMY)
+    plaintext = bytes(range(length))
+    assert decrypt_iv_prefixed(encrypt_iv_prefixed_pkcs7(plaintext, key), key) == plaintext
+
+
+def test_decrypt_iv_prefixed_keeps_zero_padding():
+    key = derive_key(FAKE_DUMMY)
+    decrypted = decrypt_iv_prefixed(encrypt_iv_prefixed(b"<a/>", key), key)
+    assert decrypted == b"<a/>" + b"\x00" * 12
+
+
+def test_decrypt_iv_prefixed_keeps_a_tail_that_is_not_valid_pkcs7():
+    key = derive_key(FAKE_DUMMY)
+    plaintext = b"0123456789abc\x03\x02\x03"
+    assert decrypt_iv_prefixed(encrypt_iv_prefixed(plaintext, key), key) == plaintext
+
+
+def test_decrypt_iv_prefixed_keeps_padding_of_a_truncated_ciphertext():
+    # A cut-off file's last whole block is not its real last block, so what
+    # looks like padding there is content.
+    key = derive_key(FAKE_DUMMY)
+    plaintext = b"0123456789abcdef0123456789abcd\x02\x02"
+    raw = encrypt_iv_prefixed_pkcs7(plaintext, key)[:-16] + b"cut"
+    assert decrypt_iv_prefixed(raw, key) == plaintext
 
 
 def test_decrypt_dummy_ecb_round_trip():

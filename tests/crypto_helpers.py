@@ -29,3 +29,11 @@ def encrypt_dummy_ecb(session_dummy: str) -> str:
     padded = plaintext + b"\x00" * pad_len
     cipher = AES.new(FIXED_DUMMY_ECB_KEY, AES.MODE_ECB)
     return cipher.encrypt(padded).hex()
+
+
+def encrypt_iv_prefixed_pkcs7(plaintext: bytes, key: bytes) -> bytes:
+    """Like encrypt_iv_prefixed, but with the PKCS#7 padding real backups use."""
+    iv = os.urandom(16)
+    pad_len = 16 - len(plaintext) % 16
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    return iv + cipher.encrypt(plaintext + bytes([pad_len]) * pad_len)
