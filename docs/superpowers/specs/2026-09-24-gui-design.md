@@ -151,8 +151,9 @@ codes are only inside `<details>` elements.
 - `app.py` — `main()`: `QApplication`, language, main window.
 - `i18n.py` — `tr(key, **fmt)` over two dictionaries (`it`, `en`) of every
   visible string; language from `QLocale` (Italian if the system language is
-  Italian, else English), switchable from the **Language** menu; switching
-  re-applies texts to the current page. A test checks both dictionaries have
+  Italian, else English), switchable with a language button in the wizard's
+  button row ("Italiano" / "English"); switching re-applies texts to every
+  page. A test checks both dictionaries have
   the same keys.
 - `worker.py` — `Worker(QThread)` running a callable with a `CancelToken`,
   relaying `Progress` through a Qt signal; signals `finished(result)`,
@@ -202,7 +203,8 @@ Pages:
 
 - `ssba.spec` (PyInstaller, one-folder): two executables sharing one
   folder — `SmartSwitch Backup Analyzer.exe` (windowed, `ssba.gui.app`) and
-  `ssba.exe` (console, `ssba.cli.main`), with an application icon.
+  `ssba.exe` (console, `ssba.cli.main`). No custom icon yet (added when the
+  project has artwork).
 - `build.ps1`: creates a clean virtual environment, `pip install
   ".[gui,build]"`, runs PyInstaller, zips the folder as
   `SmartSwitch-Backup-Analyzer-<version>-windows.zip`.
