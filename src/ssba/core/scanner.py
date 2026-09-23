@@ -6,6 +6,7 @@ content.
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Literal
 
 from ssba.core.container import decrypt_file, sniff_kind
 from ssba.core.crypto import derive_key
+from ssba.core.progress import CancelToken, ProgressFn, check_cancel, emit
 from ssba.core.session import get_session_dummy
 
 FileStatus = Literal["decrypted", "plaintext_passthrough", "undecoded", "error"]
@@ -536,7 +538,15 @@ def _recurse_zip(
 
 
 def scan_category(
-    backup_root: Path, category: str, key: bytes, out_dir: Path
+    backup_root: Path,
+    category: str,
+    key: bytes,
+    out_dir: Path,
+    *,
+    progress: ProgressFn | None = None,
+    cancel: CancelToken | None = None,
+    done: int = 0,
+    total: int | None = None,
 ) -> CategoryResult:
     category_dir = backup_root / category
     result = CategoryResult(category=category)
@@ -544,7 +554,9 @@ def scan_category(
         return result
     category_out_dir = out_dir / category
     for entry in sorted(p for p in category_dir.rglob("*") if p.is_file()):
+        check_cancel(cancel)
         rel_name = entry.relative_to(category_dir).as_posix()
+        emit(progress, "scan", done, total, f"{category}/{rel_name}")
         try:
             raw = entry.read_bytes()
         except OSError as exc:
@@ -561,7 +573,12 @@ def scan_category(
 
 
 def scan_backup(
-    backup_root: Path, out_dir: Path, categories: list[str] | None = None
+    backup_root: Path,
+    out_dir: Path,
+    categories: list[str] | None = None,
+    *,
+    progress: ProgressFn | None = None,
+    cancel: CancelToken | None = None,
 ) -> BackupReport:
     session_dummy = get_session_dummy(backup_root)
     key = derive_key(session_dummy)
@@ -570,6 +587,22 @@ def scan_backup(
     if categories is not None:
         wanted = set(categories)
         selected = [c for c in selected if c in wanted]
-    for category in selected:
-        report.categories.append(scan_category(backup_root, category, key, out_dir))
+    total = len(selected)
+    for index, category in enumerate(selected):
+        check_cancel(cancel)
+        report.categories.append(
+            scan_category(
+                backup_root, category, key, out_dir,
+                progress=progress, cancel=cancel, done=index, total=total,
+            )
+        )
+    emit(progress, "scan", total, total)
     return report
+
+
+def write_report(report: BackupReport, out_dir: Path) -> Path:
+    """Write ``report.json`` (what every exporter reads) into ``out_dir``."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "report.json"
+    path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+    return path

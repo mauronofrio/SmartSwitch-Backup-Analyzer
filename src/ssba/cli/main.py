@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import functools
-import json
 import sys
 from pathlib import Path
 
@@ -26,7 +25,7 @@ from ssba.core.parsers.files import (
 from ssba.core.parsers.messages import MessageExportError, export_messages
 from ssba.core.parsers.notes import NotesExportError, export_notes
 from ssba.core.parsers.wifi import WifiExportError, export_wifi
-from ssba.core.scanner import scan_backup
+from ssba.core.scanner import scan_backup, write_report
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -367,9 +366,7 @@ def run(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
 
-        args.out.mkdir(parents=True, exist_ok=True)
-        report_path = args.out / "report.json"
-        report_path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+        report_path = write_report(report, args.out)
 
         any_success = False
         for category in report.categories:
