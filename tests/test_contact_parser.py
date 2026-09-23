@@ -333,3 +333,29 @@ def test_tricky_fixture_values_survive_exactly():
     assert second.x_android_custom.value == (
         "vnd.sec.cursor.item/emergency_info;;via Roma 1, 00100 Roma, piano 3;;;;;;;;;;;;;"
     )
+
+
+def test_begin_vcard_inside_a_value_does_not_split_the_card():
+    again = _one(_card("N:Rossi;Mario;;;", "NOTE:incolla BEGIN:VCARD qui", "TEL;CELL:+39 333"))
+    assert again.note.value == "incolla BEGIN:VCARD qui"
+    assert again.tel.value == "+39 333"
+
+
+def test_end_vcard_inside_a_value_does_not_end_the_card():
+    again = _one(_card("N:Rossi;Mario;;;", "NOTE:testo END:VCARD testo", "TEL;CELL:+39 333"))
+    assert again.note.value == "testo END:VCARD testo"
+    assert again.tel.value == "+39 333"
+
+
+def test_text_between_cards_goes_to_unparsed():
+    text = _card("N:Uno;Primo;;;") + "TEL;CELL:+39 333\r\n" + _card("N:Due;Secondo;;;")
+    cards, unparsed = parse_cards(text)
+    assert [vobject.readOne(c).fn.value for c in cards] == ["Primo Uno", "Secondo Due"]
+    assert unparsed == ["TEL;CELL:+39 333"]
+
+
+def test_blank_lines_between_cards_are_ignored():
+    text = _card("N:Uno;Primo;;;") + "\r\n \r\n" + _card("N:Due;Secondo;;;")
+    cards, unparsed = parse_cards(text)
+    assert len(cards) == 2
+    assert unparsed == []

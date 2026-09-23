@@ -10,10 +10,14 @@ from pathlib import Path
 
 import vobject
 
-# A card runs from BEGIN:VCARD to the first END:VCARD with no other BEGIN:VCARD
-# in between, so a truncated card cannot swallow the card after it.
-_CARD_RE = re.compile(r"BEGIN:VCARD(?:(?!BEGIN:VCARD).)*?END:VCARD", re.DOTALL | re.IGNORECASE)
-_BEGIN_RE = re.compile(r"BEGIN:VCARD", re.IGNORECASE)
+# A card runs from a BEGIN:VCARD line to the first END:VCARD line with no other
+# BEGIN:VCARD line in between, so a truncated card cannot swallow the card after
+# it. Both must be whole lines: the same words inside a value are just text.
+_BEGIN_LINE = r"^BEGIN:VCARD[ \t]*\r?$"
+_CARD_RE = re.compile(
+    _BEGIN_LINE + r"(?:(?!" + _BEGIN_LINE + r").)*?^END:VCARD[ \t]*(?=\r?$)",
+    re.DOTALL | re.IGNORECASE | re.MULTILINE,
+)
 _EXPORTABLE_STATUSES = {"decrypted", "plaintext_passthrough"}
 
 
@@ -298,9 +302,8 @@ def parse_cards(text: str) -> tuple[list[str], list[str]]:
     unparsed: list[str] = []
 
     def keep_leftover(gap: str) -> None:
-        begin = _BEGIN_RE.search(gap)
-        if begin:
-            unparsed.append(gap[begin.start():].rstrip("\r\n"))
+        if gap.strip():
+            unparsed.append(gap.strip("\r\n"))
 
     position = 0
     for match in _CARD_RE.finditer(text):
