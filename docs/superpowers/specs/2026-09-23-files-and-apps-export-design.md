@@ -93,12 +93,17 @@ src/ssba/cli/main.py             # export files --mode, export apps, export all 
   category (the phone storage path).
 - Original dates: from every manifest JSON in the storage categories,
   `FilePath` with a leading `/mnt/sdcard/` or `/storage/emulated/0/` removed →
-  `DateModified / 1000` when it is a number > 0 (first entry wins). A
-  manifest that is not readable JSON of that shape is ignored (counted in
-  `bad_manifests`). Manifest entries with no scanned file at that path in any
-  storage category → counted in `missing` (never an error). After a `move`
-  the manifests stay in the scan, so a later run counts the moved files as
-  missing — expected, and the CLI line says "not found in the scan".
+  `DateModified / 1000` when it is a number > 0 (first entry wins). The match
+  against the scanned file's path is case-insensitive, because Android's
+  shared storage is: Smart Switch's manifest sometimes spells a folder with
+  different letter case than the scanned file path (e.g. `Pictures/WhatsApp/`
+  in the manifest vs `Pictures/Whatsapp/` on disk); the target path keeps the
+  scanned file's own spelling. A manifest that is not readable JSON of that
+  shape is ignored (counted in `bad_manifests`). Manifest entries with no
+  scanned file at that path (case-insensitively) in any storage category →
+  counted in `missing` (never an error). After a `move` the manifests stay in
+  the scan, so a later run counts the moved files as missing — expected, and
+  the CLI line says "not found in the scan".
 - Originals: every regular file under `<scan_dir>/<ORIGIN category>`; its
   path relative to the category, with a leading
   `data/sec/photoeditor/0/storage/emulated/0/` or else

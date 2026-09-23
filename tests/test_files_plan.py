@@ -5,7 +5,7 @@ from pathlib import PurePosixPath
 import pytest
 
 from ssba.core.parsers.files import FilesExportError, found_categories, plan_files
-from tests.files_fixtures import T, build_files_scan_dir
+from tests.files_fixtures import T, build_files_scan_dir, item
 from tests.scan_fixtures import add_category
 
 
@@ -64,6 +64,20 @@ def test_bad_manifest_values_are_skipped(tmp_path):
     plan = plan_files(build_files_scan_dir(tmp_path / "scan", manifests=manifests))
     assert _targets(plan)["DCIM/Camera/a.jpg"].mtime is None
     assert (plan.missing, plan.bad_manifests) == (0, 0)
+
+
+def test_manifest_matches_scanned_path_case_insensitively(tmp_path):
+    # Android shared storage is case-insensitive; Smart Switch's manifest can spell a
+    # folder differently than the scanned file path (real example: WhatsApp vs Whatsapp).
+    scan_dir = build_files_scan_dir(
+        tmp_path / "scan",
+        files={"Photo": {"Pictures/Whatsapp/x.jpg": b"x"}},
+        manifests={"Photo": [item("/mnt/sdcard/Pictures/WhatsApp/x.jpg", T)]},
+    )
+    plan = plan_files(scan_dir)
+    planned = _targets(plan)["Pictures/Whatsapp/x.jpg"]
+    assert planned.mtime == T / 1000
+    assert plan.missing == 0
 
 
 def test_originals_go_to_their_own_folder(tmp_path):

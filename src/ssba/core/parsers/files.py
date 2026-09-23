@@ -120,13 +120,18 @@ def plan_files(scan_dir: Path) -> FilesPlan:
                     phone = _phone_path(item.get("FilePath")) if isinstance(item, dict) else None
                     if phone is None:
                         continue
-                    listed.add(phone)
+                    # Android's shared storage is case-insensitive, and Smart Switch's
+                    # manifest sometimes spells a folder differently than the scanned path
+                    # (e.g. "WhatsApp" vs "Whatsapp"): match case-insensitively.
+                    key = phone.casefold()
+                    listed.add(key)
                     ms = item.get("DateModified")
                     if isinstance(ms, (int, float)) and not isinstance(ms, bool) and ms > 0:
-                        dates.setdefault(phone, ms / 1000)
+                        dates.setdefault(key, ms / 1000)
 
-    plan.missing = len(listed - {rel.as_posix() for _, rel in storage})
+    scanned = {rel.as_posix().casefold() for _, rel in storage}
+    plan.missing = len(listed - scanned)
     plan.files = [
-        PlannedFile(source, rel, False, dates.get(rel.as_posix())) for source, rel in storage
+        PlannedFile(source, rel, False, dates.get(rel.as_posix().casefold())) for source, rel in storage
     ] + originals
     return plan
