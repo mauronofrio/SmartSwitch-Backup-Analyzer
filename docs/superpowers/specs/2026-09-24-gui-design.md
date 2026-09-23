@@ -14,7 +14,7 @@ Decisions taken with the project owner:
 - Audience: anyone, on **Windows**, as a downloadable `.exe` (no Python
   needed). Not published on PyPI.
 - Interface in **Italian and English** (system language by default,
-  switchable from a menu).
+  switchable with a button).
 - A **guided wizard** only; results are opened with the programs the user
   already has (File Explorer, browser). No in-app viewers.
 - Toolkit: **PySide6 (Qt)**.
@@ -72,10 +72,10 @@ and a `gui-scripts` entry `ssba-gui = "ssba.gui.app:main"`.
 ### Engine functions that gain `progress` / `cancel`
 
 - `scan_backup(backup_root, out_dir, categories=None, *, progress=None,
-  cancel=None)`: one progress event per category (`stage="scan"`, `done` =
-  categories finished, `total` = categories selected, `item` = category) and
-  per file inside a category (`item` = file name, `total=None`); `check()`
-  between files.
+  cancel=None)`: one progress event per source file (`stage="scan"`, `done` =
+  categories finished, `total` = categories selected, `item` =
+  `<category>/<file>`), then a final `(total, total, "")`; `check()` before
+  each category and each file.
 - `write_report(report, out_dir) -> Path` (new, in `scanner.py`): writes
   `report.json` exactly as `ssba scan` does today; the CLI now calls it.
 - `export_files(…, *, progress=None, cancel=None)`: one event per planned
