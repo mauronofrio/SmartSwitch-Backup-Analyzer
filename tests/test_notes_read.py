@@ -46,6 +46,12 @@ def test_parent_cycle_and_empty_folder_name_do_not_hang(tmp_path):
     assert notes["Nota"].folder == ("B", "Untitled folder")
 
 
+def test_untitled_note_fallback_when_title_and_created_at_are_both_missing(tmp_path):
+    note = ("n", "", None, b"x", UNCAT, "1", 0, None, T0)
+    notes = _read(tmp_path, notes=[note], index=[], media={})
+    assert "Untitled note" in notes
+
+
 def test_text_comes_from_the_index_then_the_preview(tmp_path):
     notes = _read(tmp_path)
     assert (notes["Lista spesa"].text, notes["Lista spesa"].text_source) == ("Latte\nPane\nUova", "index")

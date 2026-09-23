@@ -118,6 +118,13 @@ def test_attachment_named_like_the_text_file_gets_its_own_name(tmp_path):
     assert (out / "Uncategorized/Nota_attachment.txt").read_bytes() == b"allegato"
 
 
+def test_attachment_without_a_file_extension_gets_the_title_as_its_name(tmp_path):
+    notes = [("a", "Nota", None, None, UNCAT, "1", 0, T0, T0)]
+    _, out = _export(tmp_path, notes=notes, index=[], media={"1": {"0@blob": b"raw bytes"}})
+    assert _files(out) == ["Uncategorized/Nota"]
+    assert (out / "Uncategorized/Nota").read_bytes() == b"raw bytes"
+
+
 def test_line_breaks_are_normalized(tmp_path):
     notes = [("a", "Nota", None, None, UNCAT, "1", 0, T0, T0)]
     _, out = _export(tmp_path, notes=notes, index=[("a", "uno\r\ndue\rtre")], media={"1": {}})
