@@ -16,6 +16,7 @@ from tests.clipboard_fixtures import build_clipboard_scan_dir
 from tests.clock_fixtures import build_clock_scan_dir
 from tests.contact_fixtures import build_scan_dir
 from tests.crypto_helpers import encrypt_dummy_ecb, encrypt_iv_prefixed
+from tests.discovery_fixtures import write_history
 from tests.files_fixtures import build_files_scan_dir
 from tests.message_fixtures import build_message_scan_dir
 from tests.notes_fixtures import build_notes_scan_dir
@@ -463,3 +464,14 @@ def test_export_all_without_file_categories_still_runs_the_other_exports(tmp_pat
     assert "== files ==" in captured.out
     assert "error: no file categories found in the scan output" in captured.err
     assert f"1 of 11 exports written to {out}" in captured.out
+
+
+def test_backups_lists_the_found_backups(tmp_path, capsys):
+    folder = write_history(tmp_path / "root" / "SM-X" / "SM-X_" / "SM-X_1", size=58392323062)
+    assert run(["backups", "--root", str(tmp_path / "root")]) == 0
+    assert f"{folder}  Telefono (SM-X)  2026-01-02 03:04  54.4 GB" in capsys.readouterr().out
+
+
+def test_backups_says_when_none_are_found(tmp_path, capsys):
+    assert run(["backups", "--root", str(tmp_path)]) == 0
+    assert f"no Smart Switch backups found in {tmp_path}" in capsys.readouterr().out

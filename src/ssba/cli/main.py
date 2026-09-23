@@ -7,6 +7,7 @@ import functools
 import sys
 from pathlib import Path
 
+from ssba.core.discovery import default_roots, find_backups, format_size
 from ssba.core.errors import UnsupportedBackupError
 from ssba.core.parsers.apps import AppsExportError, export_apps
 from ssba.core.parsers.blocked import BlockedExportError, export_blocked_numbers
@@ -53,6 +54,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="NAME",
         help="only scan this category (repeatable); defaults to every category found",
+    )
+
+    backups_parser = subparsers.add_parser(
+        "backups", help="list the Smart Switch backups found on this PC"
+    )
+    backups_parser.add_argument(
+        "--root",
+        dest="roots",
+        action="append",
+        type=Path,
+        default=None,
+        metavar="FOLDER",
+        help="folder to search (repeatable); defaults to Smart Switch's backup folders",
     )
 
     export_parser = subparsers.add_parser(
@@ -384,6 +398,18 @@ def run(argv: list[str] | None = None) -> int:
             )
         print(f"\nfull report written to {report_path}")
         return 0 if any_success else 1
+
+    if args.command == "backups":
+        roots = args.roots if args.roots is not None else default_roots()
+        found = find_backups(roots)
+        if not found:
+            print(f"no Smart Switch backups found in {', '.join(str(r) for r in roots) or '(no folder)'}")
+            return 0
+        for backup in found:
+            name = f"{backup.device_name} " if backup.device_name else ""
+            when = backup.saved_at.strftime("%Y-%m-%d %H:%M") if backup.saved_at else "?"
+            print(f"{backup.path}  {name}({backup.model})  {when}  {format_size(backup.size)}")
+        return 0
 
     if args.command == "export":
         if args.export_kind == "all":
