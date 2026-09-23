@@ -72,10 +72,30 @@ def export_calls(scan_dir: Path, out_path: Path) -> CallExportResult:
                 date = _integer(entry, "date")
                 call_type = _integer(entry, "type")
                 duration = _integer(entry, "duration", 0)
-                presentation = _integer(entry, "presentation", 1)
             except ValueError as exc:
                 unsupported.append({
                     "reason": str(exc),
+                    "source": path.name,
+                    "fields": {child.tag: child.text or "" for child in entry},
+                })
+                continue
+            try:
+                presentation = _integer(entry, "presentation", 1)
+            except ValueError:
+                # An unreadable presentation is cosmetic (caller-ID display
+                # hint), unlike date/type/duration: fall back rather than
+                # lose the whole call.
+                presentation = 1
+            if date <= 0:
+                unsupported.append({
+                    "reason": "date is not positive",
+                    "source": path.name,
+                    "fields": {child.tag: child.text or "" for child in entry},
+                })
+                continue
+            if duration < 0:
+                unsupported.append({
+                    "reason": "duration is negative",
                     "source": path.name,
                     "fields": {child.tag: child.text or "" for child in entry},
                 })

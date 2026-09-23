@@ -74,6 +74,14 @@ def test_missing_duration_and_presentation_get_defaults(tmp_path):
     assert calls[0].get("presentation") == "1"
 
 
+def test_non_integer_presentation_falls_back_to_default(tmp_path):
+    result, out = _export(tmp_path, call_log(call(presentation="x")))
+    _, calls = _calls(out)
+    assert result.exported == 1
+    assert result.unsupported == 0
+    assert calls[0].get("presentation") == "1"
+
+
 def test_unknown_type_is_kept_and_counted(tmp_path):
     result, out = _export(tmp_path, call_log(call(type_="42")))
     _, calls = _calls(out)
@@ -97,6 +105,20 @@ def test_unconvertible_call_goes_to_side_file(tmp_path, bad, reason):
     assert rows[0]["reason"] == reason
     assert rows[0]["source"] == "call_log.exml"
     assert rows[0]["fields"]["number"] == "+393330000001"
+
+
+@pytest.mark.parametrize("bad, reason", [
+    (call(date="0"), "date is not positive"),
+    (call(date="-1700000002000"), "date is not positive"),
+    (call(duration="-5"), "duration is negative"),
+])
+def test_non_positive_values_go_to_side_file(tmp_path, bad, reason):
+    result, out = _export(tmp_path, call_log(call(date="1700000001000"), bad))
+
+    assert result.exported == 1
+    assert result.unsupported == 1
+    rows = json.loads(result.unsupported_path.read_text(encoding="utf-8"))
+    assert rows[0]["reason"] == reason
 
 
 def test_clean_export_removes_a_stale_side_file(tmp_path):

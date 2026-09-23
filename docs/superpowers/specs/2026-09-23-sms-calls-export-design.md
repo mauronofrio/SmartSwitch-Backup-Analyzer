@@ -163,6 +163,14 @@ src/ssba/cli/main.py # new subcommands: ssba export messages | calls
     database missing one of the four tables above → `MessageExportError`
     naming the file. Several sources are exported into the same file.
   - Per message (`messages_backup` row):
+    - SQLite allows any storage class in any column regardless of its
+      declared type. Before anything else: if `message_status`,
+      `received_timestamp` or `sent_timestamp` is not `NULL` and not an
+      `int` (e.g. TEXT or REAL), or any part's `text` is not a `str` (e.g. a
+      BLOB), the message is unsupported (`reason: "bad column type"`)
+      rather than crashing. In the side file, any `bytes` value — in
+      `message` or in `texts` — is written as its `.hex()` string so the
+      side file stays valid JSON.
     - `message_status >= 200` → skipped, counted in `system_skipped`.
     - `body`: the non-null `text` of its parts ordered by part `_id`, joined
       with `"\n"`. No text at all → unsupported (`reason: "no text"`).
@@ -177,8 +185,9 @@ src/ssba/cli/main.py # new subcommands: ssba export messages | calls
       bytes never abort the export; they become U+FFFD via the XML rules
       and are counted.
     - `date`: `received_timestamp`, or `sent_timestamp` if that is 0/NULL;
-      both missing → unsupported. `date_sent`: `sent_timestamp` when > 0,
-      else omitted.
+      both missing, or the result `<= 0` (the published XSD types `date` and
+      `date_sent` as `xs:unsignedLong`) → unsupported (`reason: "no
+      date"`). `date_sent`: `sent_timestamp` when > 0, else omitted.
     - `read`: 1 if the `read` column is truthy, else 0.
     - `contact_name`: that participant's `full_name` when non-empty, else
       omitted.
@@ -203,7 +212,13 @@ src/ssba/cli/main.py # new subcommands: ssba export messages | calls
     - `number`: text of `number` (may be empty — private numbers).
     - `date`, `duration`, `type`: must be integers, otherwise unsupported
       (`reason` names the field). `duration` missing → 0.
-    - `presentation`: its integer value, default 1.
+    - `date <= 0` → unsupported (`reason: "date is not positive"`; the
+      published XSD types `date` as `xs:unsignedLong`). `duration < 0` →
+      unsupported (`reason: "duration is negative"`).
+    - `presentation`: its integer value, default 1. Unlike `date`/`type`/
+      `duration`, a non-integer `presentation` does not lose the call: it
+      falls back to 1 (it is a cosmetic caller-ID display hint, not a
+      counted or dated fact).
     - `contact_name`: text of `name` when non-empty, else omitted.
     - `type` outside 1-7 is kept as is and counted in `unknown_types`.
     - Not exported: `subscription_id`, `sim_id`, `sec_icc_id` (they identify
@@ -239,15 +254,20 @@ database created with a reduced copy of the real schema, and a hand-written
   kept. Contact tests stay green unchanged.
 - `messages`: incoming and outgoing SMS; RCS counted; status 3/8/9/≥200/≤0;
   multi-part body; message without parts; group conversation and missing
-  address → side file with reason; `date` fallback and omitted `date_sent`;
-  `contact_name` present/omitted; body with `& < > "`, newlines, tab, CR,
-  emoji and a control character (replaced and counted) round-trips exactly
-  after re-parsing the output; missing table and no SQLite source → error;
-  several sources merged; stale side file deleted; unwritable output → error.
-  The output validates against the attribute rules of the published XSD
-  (required attributes present, integer types).
+  address → side file with reason; `date` fallback, a non-positive `date`,
+  and omitted `date_sent`; a non-int `message_status`/`received_timestamp`
+  and a BLOB part `text` → side file with `reason: "bad column type"` (side
+  file stays valid JSON, bytes hex-encoded); `contact_name` present/omitted;
+  body with `& < > "`, newlines, tab, CR, emoji and a control character
+  (replaced and counted) round-trips exactly after re-parsing the output;
+  missing table and no SQLite source → error; several sources merged; stale
+  side file deleted; unwritable output → error. The output validates against
+  the attribute rules of the published XSD (required attributes present,
+  integer types).
 - `calls`: each type; private number; missing name; non-integer date → side
-  file; unknown type kept and counted; malformed XML and wrong root → error;
+  file; a non-positive `date` and a negative `duration` → side file; a
+  non-integer `presentation` falls back to 1 and the call is still exported;
+  unknown type kept and counted; malformed XML and wrong root → error;
   ordering by date; SIM fields not exported.
 - CLI: success output and exit 0; missing `report.json` and unwritable
   `--out` → exit 1 with `error:`.
