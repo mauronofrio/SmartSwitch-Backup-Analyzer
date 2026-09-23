@@ -144,18 +144,28 @@ def export_messages(scan_dir: Path, out_path: Path) -> MessageExportResult:
     for path in _find_sources(scan_dir):
         db = _read_database(path)
         for message in db.messages:
-            status = message["message_status"]
-            if status is not None and status >= _FIRST_SYSTEM_STATUS:
-                result.system_skipped += 1
-                continue
-
             def reject(reason: str) -> None:
+                def hexify(value):
+                    return value.hex() if isinstance(value, bytes) else value
+
                 unsupported.append({
                     "reason": reason,
                     "source": path.name,
-                    "message": dict(message),
-                    "texts": db.texts.get(message["_id"], []),
+                    "message": {k: hexify(v) for k, v in dict(message).items()},
+                    "texts": [hexify(t) for t in db.texts.get(message["_id"], [])],
                 })
+
+            status = message["message_status"]
+            bad_types = any(
+                message[column] is not None and not isinstance(message[column], int)
+                for column in ("message_status", "received_timestamp", "sent_timestamp")
+            ) or any(not isinstance(t, str) for t in db.texts.get(message["_id"], []))
+            if bad_types:
+                reject("bad column type")
+                continue
+            if status is not None and status >= _FIRST_SYSTEM_STATUS:
+                result.system_skipped += 1
+                continue
 
             sms_type = _sms_type(status)
             if sms_type is None:
@@ -174,7 +184,7 @@ def export_messages(scan_dir: Path, out_path: Path) -> MessageExportResult:
                 continue
             sent = message["sent_timestamp"] or 0
             date = message["received_timestamp"] or sent
-            if not date:
+            if date <= 0:
                 reject("no date")
                 continue
 

@@ -115,6 +115,44 @@ def test_message_without_text_is_unsupported(tmp_path):
     assert _side_rows(result)[0]["reason"] == "no text"
 
 
+def test_bad_status_type_is_unsupported(tmp_path):
+    messages = [(100, 10, 2, 100, 1, 1700000002000, 0, 0), (101, 10, 2, "12x", 1, 1700000003000, 0, 0)]
+    parts = [(100, "text/plain", "x"), (101, "text/plain", "y")]
+    result, _ = _export(tmp_path, messages=messages, parts=parts, **ONE_TO_ONE)
+    assert result.exported == 1
+    assert result.unsupported == 1
+    assert _side_rows(result)[0]["reason"] == "bad column type"
+
+
+def test_bad_received_timestamp_type_is_unsupported(tmp_path):
+    messages = [(100, 10, 2, 100, 1, 1700000002000, 0, 0), (101, 10, 2, 100, 1, 1.5, 0, 0)]
+    parts = [(100, "text/plain", "x"), (101, "text/plain", "y")]
+    result, _ = _export(tmp_path, messages=messages, parts=parts, **ONE_TO_ONE)
+    assert result.exported == 1
+    assert result.unsupported == 1
+    assert _side_rows(result)[0]["reason"] == "bad column type"
+
+
+def test_blob_part_text_is_unsupported(tmp_path):
+    messages = [(100, 10, 2, 100, 1, 1700000002000, 0, 0), (101, 10, 2, 100, 1, 1700000003000, 0, 0)]
+    scan_dir = build_message_scan_dir(tmp_path / "scan", messages=messages,
+                                       parts=[(100, "text/plain", "x")], **ONE_TO_ONE)
+    con = sqlite3.connect(scan_dir / "GMMESSAGE" / DB_NAME)
+    con.execute(
+        "INSERT INTO parts_backup (message_id, content_type, text) VALUES (101, 'image/jpeg', ?)",
+        (b"\x00\x01",),
+    )
+    con.commit()
+    con.close()
+    result = export_messages(scan_dir, tmp_path / "sms.xml")
+    _, sms = _sms(tmp_path / "sms.xml")
+    assert result.exported == 1
+    assert result.unsupported == 1
+    rows = json.loads(result.unsupported_path.read_text(encoding="utf-8"))
+    assert rows[0]["reason"] == "bad column type"
+    assert rows[0]["texts"] == ["0001"]
+
+
 def test_parts_are_joined_in_part_order(tmp_path):
     _, out = _single(tmp_path, parts=[(100, "text/plain", "uno"), (100, "text/plain", "due")])
     _, sms = _sms(out)
@@ -152,6 +190,15 @@ def test_message_without_any_date_is_unsupported(tmp_path):
     messages = [(100, 10, 2, 100, 1, 1700000002000, 0, 0), (101, 10, 2, 100, 1, None, 0, 0)]
     parts = [(100, "text/plain", "x"), (101, "text/plain", "y")]
     result, _ = _export(tmp_path, messages=messages, parts=parts, **ONE_TO_ONE)
+    assert _side_rows(result)[0]["reason"] == "no date"
+
+
+def test_negative_date_is_unsupported(tmp_path):
+    messages = [(100, 10, 2, 100, 1, 1700000002000, 0, 0), (101, 10, 2, 100, 1, -5, 0, 0)]
+    parts = [(100, "text/plain", "x"), (101, "text/plain", "y")]
+    result, _ = _export(tmp_path, messages=messages, parts=parts, **ONE_TO_ONE)
+    assert result.exported == 1
+    assert result.unsupported == 1
     assert _side_rows(result)[0]["reason"] == "no date"
 
 
