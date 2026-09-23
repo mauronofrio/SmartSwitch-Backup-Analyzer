@@ -1,6 +1,6 @@
 # Samsung Notes Export
 
-Status: approved design, not yet implemented.
+Status: implemented.
 Date: 2026-09-23
 
 ## Purpose
@@ -90,7 +90,11 @@ src/ssba/cli/main.py             # export notes; export all runs 9 kinds
   `sdoc.db-wal` when that sibling file exists and starts with a WAL magic
   (`377f0682`/`377f0683`), whatever its report status, and the copy is
   opened (so the original is never modified and the WAL is applied). The
-  connection is closed before the temporary directory is removed. Missing
+  connection's `text_factory` decodes TEXT columns as UTF-8 with
+  `errors="replace"`, so a row with invalid UTF-8 in `title` or
+  `strippedContent` becomes U+FFFD in that field instead of aborting the
+  whole read with `sqlite3.OperationalError`. The connection is closed
+  before the temporary directory is removed. Missing
   `sdoc` or `category_tree` → `NotesExportError`; any `sqlite3.Error` or
   `OSError` while reading → `NotesExportError("cannot read …")`.
 - Notes root: the database's grandparent directory (`sdoc.bk`).
@@ -103,8 +107,10 @@ src/ssba/cli/main.py             # export notes; export all runs 9 kinds
   → `("Uncategorized",)`. A deleted note → `("Trash",)`.
 - Title: `title` whitespace-collapsed; else `displayTitle` decoded; else
   `Untitled <YYYY-MM-DD of createdAt>` (or `Untitled note`).
-- Text: the note's first non-blank `text_search.strippedContent` →
-  `"index"`; else a non-blank decoded `content` → `"preview"`; else `None`.
+- Text: the note's first non-blank `text_search.strippedContent`, read with
+  `ORDER BY rowid` so which one wins is deterministic when a `sdocUUID` has
+  more than one row → `"index"`; else a non-blank decoded `content` →
+  `"preview"`; else `None`.
 - Note folder: `<root>/b_<stem>.sdocx` when `<stem>` matches
   `[0-9A-Za-z_.-]+` and the directory exists; otherwise `file_missing`.
 - Attachments: files in its `media/` except `mediaInfo.dat` and `*.spi`,
@@ -116,6 +122,14 @@ src/ssba/cli/main.py             # export notes; export all runs 9 kinds
 
 - No notes → `NotesExportError`.
 - Each note goes in `out_dir/<folder parts…>` (each part made safe).
+- Before any note is planned, every folder that will be created is
+  reserved in its parent folder's used-names set (one entry per
+  `(parent parts, child name)` pair across every note's folder path). This
+  stops a category folder from colliding with a note's file — e.g. a
+  category `Nota.txt` under `Lavoro` and a note `Nota` in `Lavoro`: the
+  note is renamed (`Nota (2).txt`) instead of `mkdir()` crashing on a name
+  already taken by a file, or a file write crashing on a name already
+  taken by a directory.
 - Safe names (`safe_name`): `< > : " / \ | ? *` and characters below
   U+0020 → `_`; strip, drop trailing dots/spaces; at most 100 characters;
   empty → `Untitled`; a Windows reserved device name (`CON`, `PRN`, `AUX`,
@@ -143,7 +157,11 @@ src/ssba/cli/main.py             # export notes; export all runs 9 kinds
     handwriting or drawings, which cannot be exported.)`.
 - Attachments are copied byte for byte.
 - Every written file gets the note's `modified` time as its modification
-  time (when known).
+  time, set only when it is between 0 (exclusive) and 253402300800
+  (year 9999, exclusive) — an out-of-range or garbled `lastModifiedAt`
+  (e.g. milliseconds stored as microseconds) is silently skipped instead
+  of raising `OSError` (`OverflowError`/`ValueError`/`OSError` from
+  `os.utime` are all caught).
 - Any `OSError` → `NotesExportError("cannot export '<title>': …")`.
 - `NotesExportResult`: `notes`, `text_notes` (with text),
   `preview_only`, `attachments` (files copied), `handwriting_only` (folder
