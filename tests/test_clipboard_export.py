@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
+import struct
 import zipfile
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +12,23 @@ from ssba.core.parsers.clipboard import ClipboardExportError, export_clipboard
 from ssba.core.parsers.html_page import format_time
 from tests.clipboard_fixtures import JPEG, PNG, UNKNOWN, build_clipboard_scan_dir
 from tests.scan_fixtures import add_category, entry
+
+
+def _corrupt_zip_member(path: Path, member: str, payload: bytes) -> None:
+    """Write ``member`` deflated, then flip bytes inside its compressed data."""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(member, payload)
+    with zipfile.ZipFile(path) as zf:
+        info = zf.getinfo(member)
+    with open(path, "rb") as f:
+        f.seek(info.header_offset)
+        header = f.read(30)
+    fname_len, extra_len = struct.unpack("<HH", header[26:30])
+    data_start = info.header_offset + 30 + fname_len + extra_len
+    data = bytearray(path.read_bytes())
+    for i in range(data_start, data_start + min(info.compress_size, 16)):
+        data[i] ^= 0xFF
+    path.write_bytes(bytes(data))
 
 
 def _stamp(ms: int) -> str:
@@ -89,6 +109,15 @@ def test_corrupt_database_raises(tmp_path):
     archive.parent.mkdir(parents=True)
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr("BackupClipItem.db", b"not sqlite")
+    add_category(tmp_path, "CLIPBOARD", [entry("clipboard_backup_keyboard.zip")])
+    with pytest.raises(ClipboardExportError, match="cannot read"):
+        export_clipboard(tmp_path, tmp_path / "out")
+
+
+def test_corrupt_zip_member_raises_export_error_not_traceback(tmp_path):
+    archive = tmp_path / "CLIPBOARD" / "clipboard_backup_keyboard.zip"
+    archive.parent.mkdir(parents=True)
+    _corrupt_zip_member(archive, "BackupClipItem.db", os.urandom(4096))
     add_category(tmp_path, "CLIPBOARD", [entry("clipboard_backup_keyboard.zip")])
     with pytest.raises(ClipboardExportError, match="cannot read"):
         export_clipboard(tmp_path, tmp_path / "out")

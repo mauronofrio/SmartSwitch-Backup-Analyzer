@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import zipfile
+import zlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -161,7 +162,7 @@ def export_clipboard(scan_dir: Path, out_dir: Path) -> ClipboardExportResult:
                     else f'<img src="{src}" alt="clipboard image">'
                 )
                 entries.append(_Entry(ms, len(rows) + offset, html))
-    except (OSError, zipfile.BadZipFile, sqlite3.Error) as exc:
+    except (OSError, zipfile.BadZipFile, sqlite3.Error, zlib.error, NotImplementedError, RuntimeError) as exc:
         raise ClipboardExportError(f"cannot read {archive}: {exc}") from exc
 
     entries.sort(key=lambda e: (e.ms is None, e.ms or 0, e.order))
