@@ -59,18 +59,13 @@ class ChoosePage(QWizardPage):
         self.files_copy.setChecked(True)
         self.retranslate()
 
-    def _count(self, export) -> str:
-        backup = self.w.state.backup
-        n = sum(backup.items.get(c, 0) for c in export.categories) if backup else 0
-        return tr("p3_count", n=n) if n else ""
-
     def retranslate(self) -> None:
         self.setTitle(tr("p3_title"))
         self.setSubTitle(tr("p3_subtitle"))
         self.nothing.setText("" if self._exports else tr("p3_nothing"))
         for export in self._exports:
             if export.key in self.checks:
-                text = tr(f"export_{export.key}") + self._count(export)
+                text = tr(f"export_{export.key}")
                 if export.key == "wifi":
                     text += tr("p3_wifi_warning")
                 self.checks[export.key].setText(text)

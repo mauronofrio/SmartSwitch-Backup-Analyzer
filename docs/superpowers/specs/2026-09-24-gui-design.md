@@ -180,7 +180,8 @@ Pages:
    `<dest>\scan` in the worker; progress bar per category, current file,
    **Cancel** (asks for confirmation; a cancelled scan can be restarted).
 3. **What to recover** — one checkbox per `available_exports()` entry,
-   labelled with its item count from `BackupInfo.items` when known, all
+   labelled with its name only (no count: on the real backup Smart Switch's
+   `ItemsCount` counts backup files, e.g. SMS showed 1 for 1789 messages), all
    ticked; Wi-Fi shows "contains passwords"; for photos and files three
    choices: **Keep separate** / **Merge by copying** (default) / **Merge by
    moving** (explains: instant on the same disk, no extra space, the

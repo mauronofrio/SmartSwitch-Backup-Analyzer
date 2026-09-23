@@ -47,7 +47,8 @@ def test_only_available_exports_are_offered(wizard):
     page = wizard.page(PAGE_CHOOSE)
     assert list(page.checks) == ["clock"]
     assert page.checks["clock"].isChecked()
-    assert "(1)" in page.checks["clock"].text()
+    # Smart Switch's own item counts count backup files, not records (SMS showed "(1)").
+    assert page.checks["clock"].text() == "Alarms, timers and world clock"
     assert page.files_copy.isChecked()
     assert page.files_box.isVisible()
 
