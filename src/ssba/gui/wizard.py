@@ -60,6 +60,14 @@ class RecoveryWizard(QWizard):
         self.setPage(PAGE_RUN, RunPage(self))
         self.setPage(PAGE_SUMMARY, SummaryPage(self))
 
+    def done(self, result: int) -> None:
+        logger = logging.getLogger("ssba.gui")
+        for handler in list(logger.handlers):
+            if getattr(handler, "_ssba", False):
+                logger.removeHandler(handler)
+                handler.close()
+        super().done(result)
+
     def _on_custom_button(self, _which: int) -> None:
         # The only custom button is the language switch.
         set_language("en" if language() == "it" else "it")

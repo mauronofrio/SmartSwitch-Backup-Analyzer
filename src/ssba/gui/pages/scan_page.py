@@ -44,13 +44,15 @@ class ScanPage(QWizardPage):
 
     def initializePage(self) -> None:
         state = self.w.state
+        backup_path = state.backup.path
+        scan_dir = state.scan_dir
         self._done = False
         self.bar.setRange(0, 0)
         self.status.setText("")
         self.item.setText("")
         self.stop.setEnabled(True)
-        log.info("decrypting %s into %s", state.backup.path, state.scan_dir)
-        self.worker = Worker(lambda progress, cancel: _decrypt(state.backup.path, state.scan_dir, progress, cancel), self)
+        log.info("decrypting %s into %s", backup_path, scan_dir)
+        self.worker = Worker(lambda progress, cancel: _decrypt(backup_path, scan_dir, progress, cancel), self)
         self.worker.progressed.connect(self._on_progress)
         self.worker.succeeded.connect(self._on_done)
         self.worker.failed.connect(self._on_failed)

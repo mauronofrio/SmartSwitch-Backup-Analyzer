@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from PySide6.QtCore import QStandardPaths
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton, QVBoxLayout, QWizardPage,
 )
@@ -25,9 +26,12 @@ def free_space(path: Path) -> int | None:
         return None
 
 
-def default_destination(info: BackupInfo) -> Path:
+def default_destination(info: BackupInfo, documents: Path | None = None) -> Path:
+    if documents is None:
+        location = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+        documents = Path(location) if location else Path.home() / "Documents"
     day = info.saved_at.strftime("%Y-%m-%d") if info.saved_at else "backup"
-    return Path.home() / "Documents" / "SmartSwitch Recovery" / f"{info.model}_{day}"
+    return documents / "SmartSwitch Recovery" / f"{info.model}_{day}"
 
 
 def _inside(path: Path, folder: Path) -> bool:
@@ -130,6 +134,11 @@ class BackupPage(QWizardPage):
         except UnsupportedBackupError:
             self.w.warn(tr("p1_not_backup"))
             return
+        resolved = info.path.resolve()
+        for row, existing in enumerate(self._infos):
+            if existing.path.resolve() == resolved:
+                self.backups.setCurrentRow(row)
+                return
         self._infos.insert(0, info)
         self._refresh_list()
         self.found.setText(tr("p1_found"))
@@ -148,6 +157,9 @@ class BackupPage(QWizardPage):
     def validatePage(self) -> bool:
         state = self.w.state
         dest = Path(self.dest.text().strip()).expanduser()
+        if not dest.is_absolute():
+            self.w.warn(tr("p1_dest_relative"))
+            return False
         if state.backup is not None:
             if _inside(dest, state.backup.path):
                 self.w.warn(tr("p1_dest_inside"))
@@ -164,9 +176,13 @@ class BackupPage(QWizardPage):
         else:
             scan_dir = state.existing_scan
             state.reuse_scan = True
+        try:
+            self.w.start_log(dest)
+        except OSError as error:
+            self.w.warn(tr("p1_dest_unusable", error=error))
+            return False
         state.dest = dest
         state.scan_dir = scan_dir
-        self.w.start_log(dest)
         return True
 
     def nextId(self) -> int:

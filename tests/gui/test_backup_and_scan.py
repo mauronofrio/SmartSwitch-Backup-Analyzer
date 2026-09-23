@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 from PySide6.QtWidgets import QWizard
 
@@ -20,9 +22,11 @@ def wizard(qtbot, tmp_path, monkeypatch):
     build_backup(tmp_path / "root")
     w = RecoveryWizard(roots=[tmp_path / "root"])
     qtbot.addWidget(w)
-    w.asked, w.warned = [], []
+    w.asked, w.warned, w.infos, w.errors = [], [], [], []
     monkeypatch.setattr(w, "ask", lambda text: w.asked.append(text) or True)
     monkeypatch.setattr(w, "warn", lambda text: w.warned.append(text))
+    monkeypatch.setattr(w, "info", lambda text: w.infos.append(text))
+    monkeypatch.setattr(w, "show_error", lambda details: w.errors.append(details))
     w.show()
     return w
 
@@ -49,9 +53,29 @@ def test_low_disk_space_asks_first(wizard, tmp_path, monkeypatch):
     page = wizard.page(PAGE_BACKUP)
     page.dest.setText(str(tmp_path / "out"))
     monkeypatch.setattr(backup_page, "free_space", lambda path: 10)
-    monkeypatch.setattr(wizard, "ask", lambda text: False)
+    asked = []
+    monkeypatch.setattr(wizard, "ask", lambda text: asked.append(text) or False)
     wizard.next()
     assert wizard.currentId() == PAGE_BACKUP
+    assert asked
+
+
+def test_a_relative_destination_is_refused(wizard):
+    page = wizard.page(PAGE_BACKUP)
+    page.dest.setText("relative/path")
+    wizard.next()
+    assert wizard.currentId() == PAGE_BACKUP
+    assert wizard.warned
+
+
+def test_an_unusable_destination_is_refused(wizard, tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a folder", encoding="utf-8")
+    page = wizard.page(PAGE_BACKUP)
+    page.dest.setText(str(blocker / "out"))
+    wizard.next()
+    assert wizard.currentId() == PAGE_BACKUP
+    assert wizard.warned
 
 
 def test_decryption_runs_and_can_continue(wizard, qtbot, tmp_path):
@@ -97,3 +121,58 @@ def test_language_button_switches_every_text(wizard):
     wizard.button(QWizard.CustomButton1).click()
     assert wizard.page(PAGE_BACKUP).title() == "Scegli il backup"
     assert wizard.button(QWizard.CustomButton1).text() == "English"
+
+
+def test_picking_the_same_backup_again_selects_it_instead_of_duplicating(wizard, monkeypatch):
+    page = wizard.page(PAGE_BACKUP)
+    backup_path = wizard.state.backup.path
+    monkeypatch.setattr(wizard, "choose_folder", lambda title: backup_path)
+    page._pick_backup()
+    assert page.backups.count() == 1
+    assert page.backups.currentRow() == 0
+
+
+def test_default_destination_uses_the_given_documents_folder(tmp_path):
+    from ssba.core.discovery import BackupInfo
+    from ssba.gui.pages.backup_page import default_destination
+
+    info = BackupInfo(path=tmp_path / "backup", device_name="Telefono", model="SM-X", saved_at=None, size=1)
+    documents = tmp_path / "Documents"
+    dest = default_destination(info, documents=documents)
+    assert dest.parent.parent == documents
+
+
+def test_default_destination_falls_back_to_home_documents_when_qt_reports_none(monkeypatch, tmp_path):
+    from PySide6.QtCore import QStandardPaths
+
+    from ssba.core.discovery import BackupInfo
+    from ssba.gui.pages import backup_page
+
+    monkeypatch.setattr(QStandardPaths, "writableLocation", lambda kind: "")
+    monkeypatch.setattr(backup_page.Path, "home", lambda: tmp_path)
+    info = BackupInfo(path=tmp_path / "backup", device_name="Telefono", model="SM-X", saved_at=None, size=1)
+    dest = backup_page.default_destination(info)
+    assert dest.parent.parent == tmp_path / "Documents"
+
+
+def test_worker_uses_the_backup_path_captured_when_the_page_starts(wizard, qtbot, tmp_path):
+    page = wizard.page(PAGE_BACKUP)
+    page.dest.setText(str(tmp_path / "out"))
+    wizard.next()
+    assert wizard.currentId() == PAGE_SCAN
+    # Simulate the wizard state changing before the background thread runs its job.
+    wizard.state.backup = None
+    wizard.state.scan_dir = None
+    scan = wizard.page(PAGE_SCAN)
+    qtbot.waitUntil(scan.isComplete, timeout=20000)
+    assert (tmp_path / "out" / "scan" / "report.json").is_file()
+
+
+def test_finishing_the_wizard_closes_the_log_handler(wizard, tmp_path):
+    page = wizard.page(PAGE_BACKUP)
+    page.dest.setText(str(tmp_path / "out"))
+    assert page.validatePage()
+    logger = logging.getLogger("ssba.gui")
+    assert any(getattr(h, "_ssba", False) for h in logger.handlers)
+    wizard.done(QWizard.Rejected)
+    assert not any(getattr(h, "_ssba", False) for h in logger.handlers)
