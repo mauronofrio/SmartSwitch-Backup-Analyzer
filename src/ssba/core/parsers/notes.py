@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ssba.core.parsers.html_page import format_time
 from ssba.core.parsers.scan_report import ScanReportError, category_files
+from ssba.core.progress import CancelToken, ProgressFn, check_cancel, emit
 
 _DB_NAME = "sdoc.db"
 _DB_FOLDER = "SmartSwitchRestoreDB"
@@ -285,7 +286,13 @@ def _set_mtime(path: Path, seconds: float | None) -> None:
             pass
 
 
-def export_notes(scan_dir: Path, out_dir: Path) -> NotesExportResult:
+def export_notes(
+    scan_dir: Path,
+    out_dir: Path,
+    *,
+    progress: ProgressFn | None = None,
+    cancel: CancelToken | None = None,
+) -> NotesExportResult:
     notes = read_notes(scan_dir)
     if not notes:
         raise NotesExportError("the Samsung Notes database has no notes")
@@ -302,7 +309,10 @@ def export_notes(scan_dir: Path, out_dir: Path) -> NotesExportResult:
             parent = tuple(p.lower() for p in parts[: i - 1])
             taken_by_folder.setdefault(parent, set()).add(parts[i - 1].lower())
 
-    for note in notes:
+    total = len(notes)
+    for index, note in enumerate(notes):
+        check_cancel(cancel)
+        emit(progress, "notes", index, total, note.title)
         parts = tuple(safe_name(part) for part in note.folder)
         folder = out_dir.joinpath(*parts)
         # Windows folders are case-insensitive: share the used names.
@@ -329,4 +339,5 @@ def export_notes(scan_dir: Path, out_dir: Path) -> NotesExportResult:
         result.missing_files += note.file_missing
         result.with_drawings += note.has_drawings
         result.trashed += note.deleted
+    emit(progress, "notes", total, total)
     return result

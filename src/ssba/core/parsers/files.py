@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from ssba.core.parsers.scan_report import MissingCategoryError, ScanReportError, category_files
+from ssba.core.progress import CancelToken, ProgressFn, check_cancel, emit
 
 STORAGE_CATEGORIES = ("Photo", "Video", "Music", "Docs", "EtcFile", "EtcFolder")
 ORIGIN_CATEGORIES = ("PHOTO_ORIGIN", "VIDEO_ORIGIN")
@@ -416,14 +417,24 @@ def _count_partials(out_dir: Path) -> int:
     return count
 
 
-def export_files(scan_dir: Path, out_dir: Path, mode: str) -> FilesExportResult:
+def export_files(
+    scan_dir: Path,
+    out_dir: Path,
+    mode: str,
+    *,
+    progress: ProgressFn | None = None,
+    cancel: CancelToken | None = None,
+) -> FilesExportResult:
     if mode not in ("copy", "move"):
         raise ValueError(f"unknown mode {mode!r}: expected 'copy' or 'move'")
     plan = plan_files(scan_dir)
     _check_no_overlap(scan_dir, out_dir, plan.categories)
     result = FilesExportResult(missing=plan.missing, bad_manifests=plan.bad_manifests)
     placed_now: set[Path] = set()
-    for item in plan.files:
+    total = len(plan.files)
+    for index, item in enumerate(plan.files):
+        check_cancel(cancel)
+        emit(progress, "files", index, total, item.target.as_posix())
         target = out_dir.joinpath(*item.target.parts)
         try:
             status, _, dated = _place(item.source, target, mode, placed_now, item.mtime)
@@ -438,6 +449,7 @@ def export_files(scan_dir: Path, out_dir: Path, mode: str) -> FilesExportResult:
             result.merged += 1
         else:
             result.already_present += 1
+    emit(progress, "files", total, total)
     if mode == "move":
         for category in plan.categories:
             _remove_empty_dirs(scan_dir / category)
