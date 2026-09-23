@@ -17,7 +17,15 @@ _NEW_STYLE_MARKER = "New_Version_Style"
 _HEX = re.compile(r"(?:[0-9A-Fa-f]{2})+")
 # Characters the ZXing WIFI: format requires to be backslash-escaped.
 _QR_SPECIAL = re.compile(r'([\\;,:"])')
-_SECURITY_LABELS = {"WPA": "WPA/WPA2/WPA3", "open": "Open", "other": "Other (EAP/WEP)"}
+_SECURITY_LABELS = {
+    "WPA": "WPA/WPA2/WPA3",
+    "WPA-nopass": "WPA (password not in backup)",
+    "open": "Open",
+    "other": "Other (EAP/WEP)",
+}
+# key_mgmt values (wpa_supplicant, upper-cased, space-split) that mean the
+# network is password-protected even when no psk was recovered.
+_PROTECTED_KEY_MGMT = {"WPA-PSK", "SAE", "WPA-PSK-SHA256", "FT-PSK"}
 
 
 class WifiExportError(Exception):
@@ -110,8 +118,21 @@ def read_networks(scan_dir: Path) -> tuple[list[WifiNetwork], int]:
             (_password(b["psk"]) for b in blocks if b.get("psk") and _password(b["psk"])),
             None,
         )
-        other = any("EAP" in b.get("key_mgmt", "").upper() or "wep_key0" in b for b in blocks)
-        security = "other" if other else "WPA" if password else "open"
+        other = any(
+            "EAP" in b.get("key_mgmt", "").upper() or any(k.startswith("wep_key") for k in b)
+            for b in blocks
+        )
+        protected = any(
+            _PROTECTED_KEY_MGMT & set(b.get("key_mgmt", "").upper().split()) for b in blocks
+        )
+        if other:
+            security = "other"
+        elif password:
+            security = "WPA"
+        elif protected:
+            security = "WPA-nopass"
+        else:
+            security = "open"
         hidden = any(b.get("scan_ssid") == "1" for b in blocks)
         networks.append(WifiNetwork(ssid, security, password, hidden))
     return networks, skipped
@@ -123,7 +144,7 @@ def _qr_escape(text: str) -> str:
 
 def qr_payload(network: WifiNetwork) -> str | None:
     """The ZXing WIFI: text Android's camera and Wi-Fi settings understand."""
-    if network.security == "other":
+    if network.security in ("other", "WPA-nopass"):
         return None
     hidden = "H:true;" if network.hidden else ""
     ssid = _qr_escape(network.ssid)

@@ -59,6 +59,29 @@ def test_eap_and_wep_networks_are_other_without_qr(tmp_path, fields):
     assert qr_payload(networks[0]) is None
 
 
+@pytest.mark.parametrize("wep_key_field", ["wep_key0", "wep_key1", "wep_key2", "wep_key3"])
+def test_any_wep_key_index_is_other(tmp_path, wep_key_field):
+    fields = {"ssid": '"Ufficio"', "key_mgmt": "NONE", wep_key_field: '"abcde"'}
+    networks, _ = _read(tmp_path, store(block(**fields)))
+    assert networks[0].security == "other"
+    assert qr_payload(networks[0]) is None
+
+
+@pytest.mark.parametrize("key_mgmt", ["WPA-PSK", "SAE", "WPA-PSK-SHA256", "FT-PSK"])
+def test_protected_key_mgmt_without_password_is_wpa_nopass(tmp_path, key_mgmt):
+    networks, _ = _read(tmp_path, store(block(ssid='"Ufficio"', key_mgmt=key_mgmt)))
+    assert networks[0].security == "WPA-nopass"
+    assert qr_payload(networks[0]) is None
+
+
+def test_open_networks_without_psk_stay_open(tmp_path):
+    networks, _ = _read(
+        tmp_path,
+        store(block(ssid='"Bar"', key_mgmt="NONE"), block(ssid='"Bar2"', key_mgmt="OWE")),
+    )
+    assert [n.security for n in networks] == ["open", "open"]
+
+
 def test_block_left_open_at_the_end_is_kept(tmp_path):
     text = 'Old_Version_Style\nnetwork={\n\tssid="Coda"\n\tkey_mgmt=NONE\n'
     networks, _ = _read(tmp_path, text)
@@ -72,6 +95,16 @@ def test_qr_payload_for_wpa_escapes_special_characters():
 
 def test_qr_payload_for_open_network():
     assert qr_payload(WifiNetwork("Bar", "open", None, False)) == "WIFI:T:nopass;S:Bar;;"
+
+
+def test_export_labels_wpa_nopass_networks_and_skips_their_qr(tmp_path):
+    text = store(block(ssid='"Ufficio"', key_mgmt="WPA-PSK"))
+    scan_dir = build_wifi_scan_dir(tmp_path / "scan", text)
+    out = tmp_path / "wifi.html"
+    export_wifi(scan_dir, out)
+    html = out.read_text(encoding="utf-8")
+    assert "WPA (password not in backup)" in html
+    assert "<svg" not in html
 
 
 def test_export_writes_one_qr_code_per_network(tmp_path):
