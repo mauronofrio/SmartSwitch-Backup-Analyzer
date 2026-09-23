@@ -25,6 +25,16 @@ def test_photo_ring_list_is_not_exported(tmp_path):
     assert "+390000000999" not in out.read_text(encoding="utf-8")
 
 
+def test_a_stray_quote_in_a_number_does_not_swallow_the_next_row(tmp_path):
+    csv_text = (
+        "_id\treject_number\treject_match\n"
+        '2\t"Spam Co\t0\n'
+        "1\t+393330000001\t0\n"
+    )
+    _, out = _export(tmp_path, csv_text)
+    assert out.read_text(encoding="utf-8") == '+393330000001\n"Spam Co\n'
+
+
 def test_non_integer_ids_come_last_in_file_order(tmp_path):
     csv_text = "_id\treject_number\treject_match\nx\tB\t0\n5\tA\t0\ny\tC\t0\n"
     _, out = _export(tmp_path, csv_text)

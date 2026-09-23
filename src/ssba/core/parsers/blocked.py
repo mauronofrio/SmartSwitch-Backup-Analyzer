@@ -51,7 +51,7 @@ def export_blocked_numbers(scan_dir: Path, out_path: Path) -> BlockedExportResul
     except OSError as exc:
         raise BlockedExportError(f"cannot read {path}: {exc}") from exc
 
-    rows = list(csv.DictReader(io.StringIO(text), delimiter="\t"))
+    rows = list(csv.DictReader(io.StringIO(text), delimiter="\t", quoting=csv.QUOTE_NONE))
     lines: list[str] = []
     skipped = 0
     for _, row in sorted(enumerate(rows), key=_row_order):
