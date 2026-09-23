@@ -1,0 +1,200 @@
+# Files Merge and App List Export (Phase 2, sub-project 3)
+
+Status: approved design, not yet implemented.
+Date: 2026-09-23
+
+## Purpose
+
+Phase 1 leaves the phone's files split across Smart Switch "categories"
+(`Photo/`, `Video/`, `Music/`, `Docs/`, `EtcFile/`, `EtcFolder/`), each
+holding part of the same Android storage tree. This sub-project lets the
+owner browse them as the phone had them — one `DCIM/`, one `Download/`,
+one `Android/media/…` — and lists the installed apps so they can be
+reinstalled.
+
+The project owner chose:
+
+- three ways of handling the files: **merge by moving** them out of the
+  category folders into one Android tree (no extra copy), **merge by
+  copying** them (category folders kept), or **no merge** (files stay
+  extracted in their category folders, as `ssba scan` left them);
+- the owner's own copies of a file in two phone folders stay where they
+  were (the tree mirrors the phone); only copies the backup itself made
+  (same path in two categories) are merged;
+- the originals the Gallery keeps for edited photos are included, in their
+  own folder;
+- apps: a page listing the installed apps with a Play Store link each (the
+  backed-up APK files are only split parts; each app's base APK is inside a
+  `.penc` file encrypted differently, so they cannot be installed).
+
+## What Phase 1 gives us (verified against the real backup)
+
+- Each storage category is a folder whose paths are the phone's storage
+  paths: `Photo/DCIM/Camera/…`, `Docs/Download/…`,
+  `Video/Android/media/com.whatsapp/…`, plus files at the storage root
+  (`Docs/<name>.docx`). Many files are reported `undecoded` (HEIC, MP4, Opus,
+  …) but are the original plain files, so files are found by walking the
+  folders, not by report status.
+- Each also holds a Smart Switch manifest:
+  `<Category>/data/user/0/com.sec.android.easyMover/files/SmartSwitch/tmp/<TYPE>/<name>.json`
+  = `{"categoryType", "count", "files": [{"FilePath", "FileName", "Length",
+  "DateModified", …}]}`. `FilePath` is the full phone path starting with
+  `/mnt/sdcard/` (the storage root); `DateModified` is in milliseconds.
+  Real data: 17,171 entries (Photo 13,126, Docs 2,279, EtcFolder 951,
+  Video 518, Music 264, EtcFile 33), **every one** matching a scanned file of
+  the same size at `<Category>/<path after /mnt/sdcard/>`. The scanned files'
+  own modification times are the backup date, not the original one.
+- Overlaps: 940 paths exist in two categories (`Docs`+`EtcFolder` 910,
+  `EtcFile`+`EtcFolder` 30), all byte-identical. Separately, 164 groups of
+  identical files live at different paths (193 extra copies, 315 MB, mostly
+  WhatsApp images also saved in `Pictures/` or `Download/`) — the owner's own
+  copies, kept.
+- `PHOTO_ORIGIN/` (396) and `VIDEO_ORIGIN/` (5):
+  `data/sec/photoeditor/0/<name>` (flat) and
+  `data/sec/photoeditor/0/storage/emulated/0/<phone path>` — the Gallery's
+  originals of edited photos/videos; 42 share a file name with the edited
+  version.
+- `APKFILE/AppList.json` = `{"Apks": [{"ApkName", "ApkPkgName",
+  "InstPkgName", "VersionName", "LastTimeUsed", …}]}` — 129 apps. The 292
+  `*.apk` files are all `*_split_*` parts; the base APKs are the 129
+  `.penc` files (7.3 GB, not decryptable today).
+
+Sizes: ~29 GB of unique storage files, 0.6 GB of originals.
+
+## Scope
+
+In: `ssba export files` (modes `none`, `copy`, `move`), `ssba export apps`,
+and both in `ssba export all`.
+
+Out (non-goals): de-duplicating the owner's own copies; the `.penc` files and
+split APKs; `MYFILES` (the My Files app's databases), `SAMSUNGNOTE` (already
+exported by `export notes`), other app-data categories.
+
+## Architecture
+
+```
+src/ssba/core/parsers/files.py   # plan the Android tree, then copy or move
+src/ssba/core/parsers/apps.py    # AppList.json -> apps.html
+src/ssba/cli/main.py             # export files --mode, export apps, export all --files
+```
+
+### `files` — planning
+
+- `STORAGE_CATEGORIES = ("Photo", "Video", "Music", "Docs", "EtcFile",
+  "EtcFolder")` in that order; `ORIGIN_CATEGORIES = ("PHOTO_ORIGIN",
+  "VIDEO_ORIGIN")`.
+- A category counts when `category_files` does not raise
+  `MissingCategoryError` and `<scan_dir>/<Category>` is a directory; any other
+  `ScanReportError` → `FilesExportError`. No category at all →
+  `FilesExportError("no file categories found in the scan output")`.
+- Storage files: every regular file under `<scan_dir>/<Category>` (walk
+  without following symlinks), except the manifest folder
+  `data/user/0/com.sec.android.easyMover`; target = the path relative to the
+  category (the phone storage path).
+- Original dates: from every manifest JSON in the storage categories,
+  `FilePath` with a leading `/mnt/sdcard/` or `/storage/emulated/0/` removed →
+  `DateModified / 1000` when it is a number > 0 (first entry wins). A
+  manifest that is not readable JSON of that shape is ignored (counted in
+  `bad_manifests`). Manifest entries with no scanned file at that path in any
+  storage category → counted in `missing` (never an error). After a `move`
+  the manifests stay in the scan, so a later run counts the moved files as
+  missing — expected, and the CLI line says "not found in the scan".
+- Originals: every regular file under `<scan_dir>/<ORIGIN category>`; its
+  path relative to the category, with a leading
+  `data/sec/photoeditor/0/storage/emulated/0/` or else
+  `data/sec/photoeditor/0/` removed, goes under `_Edited photo originals/`.
+- Order: storage categories in the order above (files sorted by path within
+  each), then the originals.
+
+### `files` — placing (`export_files(scan_dir, out_dir, mode)`)
+
+- `mode` is `"copy"` or `"move"`; anything else → `ValueError`.
+- For each planned file, target = `out_dir / <target path>`:
+  - target does not exist → copy (`shutil.copyfile`) or move
+    (`shutil.move`) the source there, creating parent folders;
+  - target exists and is identical (same size and same SHA-256) → nothing is
+    written; in `move` mode the source is deleted. Counted in `merged` when
+    the target was placed earlier in this run (a backup duplicate), else in
+    `already_present` (a re-run);
+  - target exists and differs → the file goes to the first free
+    `<stem> (2)<suffix>`, `<stem> (3)<suffix>`… (an identical one found there
+    counts as identical), counted in `conflicts`.
+  Existing files are never overwritten.
+- After a file is placed, its modification time is set to its original date
+  when known (`0 < t < 253402300800`; `OSError` ignored); counted in
+  `dated`.
+- `move` mode, at the end: empty folders left inside each category folder
+  are removed (bottom-up), the category folder itself included when empty.
+- A failure to read, copy or move → `FilesExportError("cannot <copy|move>
+  <source>: …")`; a re-run resumes (placed files are identical or gone).
+- `FilesExportResult`: `placed`, `merged`, `already_present`, `conflicts`,
+  `originals` (placed originals), `dated`, `missing`, `bad_manifests`.
+
+### `apps` — `export_apps(scan_dir, out_path) -> AppsExportResult`
+
+- Source: `category_files(scan_dir, "APKFILE")` entry named `AppList.json`
+  (none → `AppsExportError`); JSON object with an `Apks` list (else
+  `AppsExportError`).
+- Each item that is an object with a non-empty `ApkPkgName`: name
+  (`ApkName`, else the package), package, version (`VersionName`), installer
+  (`InstPkgName`), last used (`LastTimeUsed` ms → `format_time`), and a link
+  `https://play.google.com/store/apps/details?id=<package>` (URL-encoded)
+  shown with `safe_link`. Items without a package → skipped (counted).
+- Page `Apps` (via `page`), sorted by name (case-insensitive), with a note:
+  the apps must be reinstalled from their store; their data is not in a
+  restorable form. `AppsExportResult`: `apps`, `skipped`. Write failure →
+  `AppsExportError("cannot write …")`.
+
+## CLI
+
+- `ssba export files <scan_dir> --out <dir> --mode none|copy|move`
+  (`--mode` required):
+  - `none`: nothing is changed; prints
+    `files left in their category folders in <scan_dir>: <Category, …>`
+    (the categories found); exit 0; no category → `error: …`, exit 1.
+  - `copy`/`move`: prints `<placed> files copied|moved into <out>`, then when
+    non-zero: `<merged> duplicate files of the backup merged`,
+    `<already_present> files were already there`,
+    `<conflicts> files had the same path but different content; kept as
+    '<name> (2)'`, `<originals> originals of edited photos in <out/_Edited
+    photo originals>`, `<dated> files got their original date back`,
+    `<missing> files listed by Smart Switch were not found in the scan`,
+    `<bad_manifests> Smart Switch file lists could not be read`.
+- `ssba export apps <scan_dir> --out <apps.html>` prints
+  `<n> apps listed in <out>` (+ skipped when non-zero).
+- `ssba export all <scan_dir> --out <dir> [--files none|copy|move]`
+  (default `none`): runs `apps` into `apps.html` and `files` with that mode
+  into `<dir>/files`, after the existing kinds; summary
+  `<n> of 11 exports written to <dir>`.
+
+## Testing
+
+Fabricated category folders, manifests and files only.
+
+- Planning: phone paths kept; manifest folder excluded; dates from both
+  prefixes; bad manifest ignored and counted; missing manifest entries
+  counted; originals mapping (nested and flat); absent categories skipped;
+  no category → error.
+- Placing, both modes: tree layout; byte-identical content; backup
+  duplicates merged once (move deletes the duplicate source only after the
+  identity check); conflict → `(2)`; never overwrite; original dates set;
+  re-run in copy mode → `already_present`, nothing rewritten; move empties and
+  removes category folders but keeps what was not moved; invalid mode.
+- Apps: sorting, fallbacks, skipped items, link escaping, page escaping,
+  errors.
+- CLI: `files` each mode, `apps`, `export all` with default `none` and with
+  `copy`, summary `of 11`.
+
+Manual, local-only validation on the real scan, on a **copy** of the scan
+folder for `move`: 17,171 storage files → 16,231 unique paths placed, 940
+merged, 0 conflicts, 401 originals, every placed file's hash equal to its
+source, 16,231 dated; 129 apps.
+
+## Constraints
+
+- Python 3.10+, no new dependency. `core/` never prints.
+- `move` only ever deletes a source after it has been moved or proven
+  identical to the file already at the target. Existing output files are never
+  overwritten.
+- No real personal data in the repository, tests or fixtures.
+- No attribution lines in commits; nothing pushed; work on `master`.
