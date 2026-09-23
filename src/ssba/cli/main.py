@@ -26,6 +26,7 @@ from ssba.core.parsers.files import (
 from ssba.core.parsers.messages import MessageExportError, export_messages
 from ssba.core.parsers.notes import NotesExportError, export_notes
 from ssba.core.parsers.wifi import WifiExportError, export_wifi
+from ssba.core.recovery import EXPORTS
 from ssba.core.scanner import scan_backup, write_report
 
 
@@ -324,19 +325,23 @@ def _run_export_files(scan_dir: Path, out: Path, mode: str) -> int:
     return 0
 
 
-# Every kind `export all` runs, in order, with the name it writes inside --out.
-_ALL_EXPORTS = (
-    ("contacts", _run_export_contacts, "contacts.vcf"),
-    ("messages", _run_export_messages, "sms.xml"),
-    ("calls", _run_export_calls, "calls.xml"),
-    ("wifi", _run_export_wifi, "wifi.html"),
-    ("blocked-numbers", _run_export_blocked_numbers, "blocked-numbers.txt"),
-    ("browser", _run_export_browser, "browser"),
-    ("clipboard", _run_export_clipboard, "clipboard"),
-    ("clock", _run_export_clock, "clock.html"),
-    ("notes", _run_export_notes, "notes"),
-    ("apps", _run_export_apps, "apps.html"),
-)
+_CLI_RUNNERS = {
+    "contacts": _run_export_contacts,
+    "messages": _run_export_messages,
+    "calls": _run_export_calls,
+    "wifi": _run_export_wifi,
+    "blocked-numbers": _run_export_blocked_numbers,
+    "browser": _run_export_browser,
+    "clipboard": _run_export_clipboard,
+    "clock": _run_export_clock,
+    "notes": _run_export_notes,
+    "apps": _run_export_apps,
+}
+
+# Every kind `export all` runs, in order, with the name it writes inside --out;
+# `files` is added by _run_export_all because it needs the chosen mode.
+_ALL_EXPORTS = tuple((e.key, _CLI_RUNNERS[e.key], e.target) for e in EXPORTS if e.key != "files")
+_FILES_TARGET = next(e.target for e in EXPORTS if e.key == "files")
 
 
 def _run_export_all(scan_dir: Path, out: Path, files_mode: str = "none") -> int:
@@ -347,12 +352,12 @@ def _run_export_all(scan_dir: Path, out: Path, files_mode: str = "none") -> int:
         # Before any exporter writes: an --out inside a category folder must not
         # get the other exports written into the scan either.
         try:
-            check_out_dir(scan_dir, out / "files")
+            check_out_dir(scan_dir, out / _FILES_TARGET)
         except FilesExportError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
     jobs = list(_ALL_EXPORTS) + [
-        ("files", functools.partial(_run_export_files, mode=files_mode), "files"),
+        ("files", functools.partial(_run_export_files, mode=files_mode), _FILES_TARGET),
     ]
     written = 0
     for name, runner, target in jobs:
