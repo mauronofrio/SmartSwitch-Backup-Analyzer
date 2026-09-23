@@ -115,7 +115,9 @@ src/ssba/cli/main.py             # export files --mode, export apps, export all 
 
 - `mode` is `"copy"` or `"move"`; anything else → `ValueError`.
 - Before placing anything: `out_dir` must not overlap any scanned category
-  folder, checked two ways, since path-string comparison alone (even
+  folder (both are first made absolute with `Path.absolute()`, so the
+  ancestor walk below sees the real parents of a relative path, not just
+  `.`, without depending on `resolve()`), checked two ways, since path-string comparison alone (even
   `resolve()`-based) cannot reliably tell a real self-reference apart from a
   same-file alias reached through a different spelling (an 8.3 short name, a
   directory junction, a symlinked ancestor, a UNC loopback path, ...):
@@ -163,11 +165,19 @@ src/ssba/cli/main.py             # export files --mode, export apps, export all 
     short, fixed-length, exclusively-created (`"xb"`) partial file in the
     same folder — `.ssba-<8 hex>.partial`, unrelated to the original name (so
     staging can't push a long filename past the filesystem's path-length
-    limit), filled with `shutil.copyfileobj`. Only the call that actually
+    limit), filled with `shutil.copyfileobj`, then `flush()` + `os.fsync()`
+    before the commit (so a `move` never removes the source before the copy
+    is on disk), then given the source's access/modification times
+    (`os.utime(..., ns=...)` from the source's `stat()` — the timestamps
+    only, like a hard-link move keeps them; not `shutil.copystat`, which would
+    also copy a read-only bit and leave a partial that cannot be dropped after
+    the commit on Windows). Only the call that actually
     created the partial (its `open(..., "xb")` succeeded) may ever delete it
     — a name collision with an unrelated, pre-existing file must never
     delete that file; on such a collision the failure propagates as
-    `FilesExportError` rather than staging succeeding by chance. Once
+    `FilesExportError` rather than staging succeeding by chance. A failure
+    of that cleanup delete (`OSError`) is ignored, so it never masks the
+    original error. Once
     staged, commit with a no-clobber `os.link(partial, candidate)` followed
     by dropping the partial name (or `os.rename` when the filesystem has no
     hard links, with a `FileExistsError` from that `os.rename` — how Windows
@@ -186,17 +196,32 @@ src/ssba/cli/main.py             # export files --mode, export apps, export all 
   copy-fallback commit) uses a helper that clears a Windows read-only bit
   and retries once if the plain delete raises `PermissionError`, so a
   read-only source is still moved instead of failing.
-- After a file is placed, its modification time is set to its original date
-  when known (`0 < t < 253402300800`; `OSError` ignored); counted in
-  `dated`.
+- The original date, when known (`0 < t < 253402300800`; `OSError`
+  ignored), is set as the modification time right after a successful commit
+  and before any source removal (a hard link shares the inode, so dating the
+  committed name dates the file) — an interrupted run, or a failed source
+  removal, can never leave a placed file without its date. It is also set
+  on a file found already present (an identical existing file, or a hard
+  link an interrupted `move` left behind — in `copy` mode that link is still
+  the source's own inode), so a re-run repairs the date of anything an
+  older run left undated. `dated` counts newly placed files only (not
+  re-dated `already_present` ones, nor `merged` duplicates, whose target was
+  dated when placed).
 - `move` mode, at the end: empty folders left inside each category folder
   are removed (bottom-up), the category folder itself included when empty.
 - A failure to read, copy or move → `FilesExportError("cannot <copy|move>
   <source>: …")`; a re-run resumes (placed files are identical or gone, or
   are recognized as the same file under a different name — see the
   `samefile` cases above).
+- After placing: the `.ssba-*.partial` files anywhere under `out_dir` (e.g.
+  left by a crashed earlier run; symlinked folders not followed) are counted
+  in `leftover_partials` — never deleted.
+- `check_out_dir(scan_dir, out_dir)`: public, runs `found_categories` and the
+  overlap check above without placing anything (`FilesExportError` if
+  unsafe), for callers that must validate before writing anything else.
 - `FilesExportResult`: `placed`, `merged`, `already_present`, `conflicts`,
-  `originals` (placed originals), `dated`, `missing`, `bad_manifests`.
+  `originals` (placed originals), `dated`, `missing`, `bad_manifests`,
+  `leftover_partials`.
 
 ### `apps` — `export_apps(scan_dir, out_path) -> AppsExportResult`
 
@@ -227,13 +252,20 @@ src/ssba/cli/main.py             # export files --mode, export apps, export all 
     '<name> (2)'`, `<originals> originals of edited photos in <out/_Edited
     photo originals>`, `<dated> files got their original date back`,
     `<missing> files listed by Smart Switch were not found in the scan`,
-    `<bad_manifests> Smart Switch file lists could not be read`.
+    `<bad_manifests> Smart Switch file lists could not be read`,
+    `<leftover_partials> unfinished '.ssba-*.partial' files from an
+    interrupted run are in <out>; they can be deleted`.
 - `ssba export apps <scan_dir> --out <apps.html>` prints
   `<n> apps listed in <out>` (+ skipped when non-zero).
 - `ssba export all <scan_dir> --out <dir> [--files none|copy|move]`
   (default `none`): runs `apps` into `apps.html` and `files` with that mode
   into `<dir>/files`, after the existing kinds; summary
-  `<n> of 11 exports written to <dir>`.
+  `<n> of 11 exports written to <dir>`. With `--files copy|move`,
+  `check_out_dir(scan_dir, <dir>/files)` runs first, before any exporter
+  writes: on `FilesExportError` it prints `error: …` and exits 1 without
+  running anything (so an `--out` inside a category folder never gets the
+  other exports written into the scan either; this includes a scan with no
+  file category at all).
 
 ## Testing
 

@@ -425,3 +425,29 @@ def test_export_all_merges_files_only_when_asked(tmp_path, capsys):
 
     assert run(["export", "all", str(scan_dir), "--out", str(out), "--files", "copy"]) == 0
     assert (out / "files" / "DCIM" / "Camera" / "a.jpg").is_file()
+
+
+def test_export_files_reports_leftover_partials(tmp_path, capsys):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "files"
+    stray = out / "DCIM" / "Camera" / ".ssba-deadbeef.partial"
+    stray.parent.mkdir(parents=True)
+    stray.write_bytes(b"half a photo")
+    assert run(["export", "files", str(scan_dir), "--out", str(out), "--mode", "copy"]) == 0
+    assert (
+        f"1 unfinished '.ssba-*.partial' files from an interrupted run are in {out}; they can be deleted"
+        in capsys.readouterr().out
+    )
+    assert stray.read_bytes() == b"half a photo"
+
+
+def test_export_all_checks_the_files_out_dir_before_writing_anything(tmp_path, capsys):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    build_apps_scan_dir(scan_dir)
+    out = scan_dir / "Photo" / "x"
+    assert run(["export", "all", str(scan_dir), "--out", str(out), "--files", "move"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: the output folder must not be inside")
+    assert "==" not in captured.out
+    assert not out.exists()
+    assert (scan_dir / "Photo" / "DCIM" / "Camera" / "a.jpg").read_bytes() == b"photo-a"

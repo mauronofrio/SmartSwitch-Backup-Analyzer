@@ -19,6 +19,7 @@ from ssba.core.parsers.contact import ContactExportError, export_contacts
 from ssba.core.parsers.files import (
     ORIGINALS_FOLDER,
     FilesExportError,
+    check_out_dir,
     export_files,
     found_categories,
 )
@@ -302,6 +303,11 @@ def _run_export_files(scan_dir: Path, out: Path, mode: str) -> int:
         print(f"{result.missing} files listed by Smart Switch were not found in the scan")
     if result.bad_manifests:
         print(f"{result.bad_manifests} Smart Switch file lists could not be read")
+    if result.leftover_partials:
+        print(
+            f"{result.leftover_partials} unfinished '.ssba-*.partial' files from an "
+            f"interrupted run are in {out}; they can be deleted"
+        )
     return 0
 
 
@@ -324,6 +330,14 @@ def _run_export_all(scan_dir: Path, out: Path, files_mode: str = "none") -> int:
     if not (scan_dir / "report.json").is_file():
         print(f"error: report.json not found in {scan_dir}", file=sys.stderr)
         return 1
+    if files_mode in ("copy", "move"):
+        # Before any exporter writes: an --out inside a category folder must not
+        # get the other exports written into the scan either.
+        try:
+            check_out_dir(scan_dir, out / "files")
+        except FilesExportError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     jobs = list(_ALL_EXPORTS) + [
         ("files", functools.partial(_run_export_files, mode=files_mode), "files"),
     ]

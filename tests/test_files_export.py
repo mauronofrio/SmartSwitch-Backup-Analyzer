@@ -382,3 +382,188 @@ def test_a_partial_name_collision_never_deletes_the_existing_file(tmp_path, monk
     with pytest.raises(FilesExportError):
         export_files(scan_dir, out, "copy")
     assert stray.read_bytes() == b"do not touch"
+
+
+def _interrupt_after_placing_a_jpg(monkeypatch):
+    """Make the run stop right after ``DCIM/Camera/a.jpg`` is committed (once)."""
+    real_place = files_module._place
+    fired = []
+
+    def place_then_stop(source, target, mode, placed_now, *a, **kw):
+        outcome = real_place(source, target, mode, placed_now, *a, **kw)
+        if not fired and target.name == "a.jpg" and "Photo" in source.parts:
+            fired.append(True)
+            raise RuntimeError("simulated interruption")
+        return outcome
+
+    monkeypatch.setattr(files_module, "_place", place_then_stop)
+
+
+@pytest.mark.parametrize("mode", ["copy", "move"])
+def test_a_run_stopped_right_after_a_commit_still_leaves_the_original_date(tmp_path, monkeypatch, mode):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+    _interrupt_after_placing_a_jpg(monkeypatch)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        export_files(scan_dir, out, mode)
+    assert abs(os.path.getmtime(out / "DCIM/Camera/a.jpg") - T / 1000) < 1
+
+    export_files(scan_dir, out, mode)  # the re-run resumes
+    assert (out / "DCIM/Camera/a.jpg").read_bytes() == b"photo-a"
+    assert abs(os.path.getmtime(out / "DCIM/Camera/a.jpg") - T / 1000) < 1
+
+
+def test_a_failed_source_removal_after_a_move_commit_still_leaves_the_original_date(tmp_path, monkeypatch):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+    real_remove = files_module._remove
+    fired = []
+
+    def failing_remove(path):
+        if not fired and path.name == "a.jpg":
+            fired.append(True)
+            raise OSError("simulated removal failure")
+        return real_remove(path)
+
+    monkeypatch.setattr(files_module, "_remove", failing_remove)
+    with pytest.raises(FilesExportError):
+        export_files(scan_dir, out, "move")
+    assert abs(os.path.getmtime(out / "DCIM/Camera/a.jpg") - T / 1000) < 1
+
+    result = export_files(scan_dir, out, "move")  # resumes from the left-behind hard link
+    assert result.already_present >= 1
+    assert not (scan_dir / "Photo/DCIM/Camera/a.jpg").exists()
+    assert abs(os.path.getmtime(out / "DCIM/Camera/a.jpg") - T / 1000) < 1
+
+
+def test_an_already_present_file_gets_its_original_date(tmp_path):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+    (out / "DCIM/Camera").mkdir(parents=True)
+    (out / "DCIM/Camera/a.jpg").write_bytes(b"photo-a")  # identical, but with today's date
+
+    result = export_files(scan_dir, out, "copy")
+    assert result.already_present == 1
+    assert result.dated == 3  # dated counts placed files only
+    assert abs(os.path.getmtime(out / "DCIM/Camera/a.jpg") - T / 1000) < 1
+
+
+def _record_fsync(monkeypatch):
+    calls = []
+    real_fsync = os.fsync
+
+    def recording_fsync(fd):
+        calls.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    return calls
+
+
+def test_a_copy_is_flushed_to_disk_before_it_is_committed(tmp_path, monkeypatch):
+    calls = _record_fsync(monkeypatch)
+    _export(tmp_path, "copy")
+    assert len(calls) == 8  # one per placed file
+
+
+def test_a_move_falling_back_to_a_copy_is_flushed_to_disk_before_the_source_is_removed(tmp_path, monkeypatch):
+    calls = _record_fsync(monkeypatch)
+    real_link = os.link
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+    events = []
+
+    def no_direct_link(src, dst, *a, **kw):
+        if not Path(src).name.startswith(".ssba-"):
+            raise OSError("cross-volume")  # force the copy fallback
+        return real_link(src, dst, *a, **kw)
+
+    real_remove = files_module._remove
+
+    def recording_remove(path):
+        events.append(("remove", len(calls)))
+        return real_remove(path)
+
+    monkeypatch.setattr(os, "link", no_direct_link)
+    monkeypatch.setattr(files_module, "_remove", recording_remove)
+    export_files(scan_dir, out, "move")
+    assert len(calls) == 8
+    assert (out / "DCIM/Camera/a.jpg").read_bytes() == b"photo-a"
+    assert not (scan_dir / "Photo/DCIM/Camera/a.jpg").exists()
+    assert events and all(synced >= 1 for _, synced in events)
+
+
+def test_a_relative_out_dir_inside_a_category_is_rejected_even_if_resolve_misses_it(tmp_path, monkeypatch):
+    # Defense in depth: the samefile ancestor walk must see the real parents of a
+    # relative out_dir, not stop at ".", even when resolve() fails to normalize.
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    monkeypatch.chdir(scan_dir / "Photo" / "DCIM")
+    monkeypatch.setattr(Path, "resolve", lambda self, strict=False: self)
+    with pytest.raises(FilesExportError, match="output folder"):
+        export_files(scan_dir, Path("out"), "copy")
+    assert not (scan_dir / "Photo/DCIM/out").exists()
+
+
+def test_a_relative_out_dir_equal_to_a_category_is_rejected(tmp_path, monkeypatch):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(FilesExportError, match="output folder"):
+        export_files(Path("scan"), Path("scan") / "Photo", "move")
+    _assert_sources_untouched(scan_dir)
+
+
+def test_an_undated_file_keeps_the_source_timestamp_in_copy_mode(tmp_path):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    src = scan_dir / "Video/DCIM/Camera/v.mp4"  # not in any Smart Switch file list
+    os.utime(src, (1500000000, 1500000000))
+    export_files(scan_dir, tmp_path / "out", "copy")
+    assert os.path.getmtime(tmp_path / "out/DCIM/Camera/v.mp4") == os.path.getmtime(src)
+
+
+def test_a_read_only_source_is_copied_and_leaves_no_partial(tmp_path):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+    src = scan_dir / "Photo/DCIM/Camera/a.jpg"
+    os.chmod(src, stat.S_IREAD)
+    try:
+        export_files(scan_dir, out, "copy")
+    finally:
+        os.chmod(src, stat.S_IWRITE | stat.S_IREAD)
+        for p in out.rglob("*"):
+            if p.is_file():
+                os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
+    assert (out / "DCIM/Camera/a.jpg").read_bytes() == b"photo-a"
+    assert not list(out.rglob("*.partial"))
+
+
+def test_leftover_partials_from_an_earlier_run_are_counted_not_deleted(tmp_path):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+    stray = out / "DCIM/Camera/.ssba-deadbeef.partial"
+    stray.parent.mkdir(parents=True)
+    stray.write_bytes(b"half a photo")
+
+    result = export_files(scan_dir, out, "copy")
+    assert result.leftover_partials == 1
+    assert stray.read_bytes() == b"half a photo"
+    assert export_files(tmp_path / "scan", tmp_path / "other", "copy").leftover_partials == 0
+
+
+def test_a_failed_partial_cleanup_does_not_mask_the_original_error(tmp_path, monkeypatch):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+
+    def failing_copyfileobj(fsrc, fdst, length=0):
+        raise OSError("original failure")
+
+    real_unlink = Path.unlink
+
+    def failing_unlink(self, *a, **kw):
+        if self.name.startswith(".ssba-"):
+            raise PermissionError("cannot delete partial")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(shutil, "copyfileobj", failing_copyfileobj)
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    with pytest.raises(FilesExportError, match="original failure"):
+        export_files(scan_dir, out, "copy")

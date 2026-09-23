@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -151,9 +152,10 @@ class FilesExportResult:
     already_present: int = 0
     conflicts: int = 0
     originals: int = 0
-    dated: int = 0
+    dated: int = 0  # placed files that got their original date (already-present ones are re-dated, not counted)
     missing: int = 0
     bad_manifests: int = 0
+    leftover_partials: int = 0  # ``.ssba-*.partial`` files in out_dir, e.g. from a crashed run; never deleted
 
 
 def _sha256(path: Path) -> str:
@@ -205,10 +207,11 @@ def _new_partial_name() -> str:
 def _commit(source: Path, candidate: Path, mode: str) -> bool:
     """Create ``candidate`` from ``source`` without ever truncating or overwriting it.
 
-    Returns True once ``candidate`` holds the file (``source`` is gone, in move
-    mode). Returns False if ``candidate`` turned out to be taken by someone else
-    between the existence check in ``_place`` and this call, so the caller falls
-    through to the next candidate name.
+    Returns True once ``candidate`` holds the file; ``source`` is always left in
+    place (the caller dates ``candidate`` and only then removes ``source`` in
+    move mode). Returns False if ``candidate`` turned out to be taken by someone
+    else between the existence check in ``_place`` and this call, so the caller
+    falls through to the next candidate name.
     """
     if mode == "move":
         try:
@@ -218,7 +221,6 @@ def _commit(source: Path, candidate: Path, mode: str) -> bool:
         except OSError:
             pass  # cross-volume, or this filesystem has no hard links: fall back below
         else:
-            _remove(source)  # only after the link at ``candidate`` succeeded
             return True
 
     # Never write straight to ``candidate``, and never delete an existing file to
@@ -235,9 +237,19 @@ def _commit(source: Path, candidate: Path, mode: str) -> bool:
         with source.open("rb") as src, partial.open("xb") as dst:
             created = True
             shutil.copyfileobj(src, dst)
+            dst.flush()
+            os.fsync(dst.fileno())  # on disk before the commit (and before a move removes the source)
+        # Keep the source's timestamps, as a hard-link move does. Only the times:
+        # shutil.copystat would also copy a read-only bit, and a read-only partial
+        # could then not be dropped after the commit on Windows.
+        st = source.stat()
+        os.utime(partial, ns=(st.st_atime_ns, st.st_mtime_ns))
     except BaseException:
         if created:
-            partial.unlink()
+            try:
+                partial.unlink()
+            except OSError:
+                pass  # never mask the original error
         raise
     try:
         os.link(partial, candidate)
@@ -260,15 +272,20 @@ def _commit(source: Path, candidate: Path, mode: str) -> bool:
             return False  # the name was taken concurrently
     else:
         partial.unlink()
-    if mode == "move":
-        _remove(source)  # only after the commit at ``candidate`` succeeded
     return True
 
 
-def _place(source: Path, target: Path, mode: str, placed_now: set[Path]) -> tuple[str, Path]:
+def _place(
+    source: Path, target: Path, mode: str, placed_now: set[Path], mtime: float | None = None
+) -> tuple[str, Path, bool]:
     """Put ``source`` at ``target`` (or a numbered free name), never overwriting.
 
-    Returns ("placed" | "conflict" | "merged" | "present", final path).
+    ``mtime`` (the original date, if known) is set on the final file right after
+    the commit -- or on a file found already present -- and always before a
+    move removes ``source``, so an interruption can never lose the date.
+
+    Returns ("placed" | "conflict" | "merged" | "present", final path, whether a
+    newly placed file got ``mtime``).
     """
     conflict = False
     for candidate in _candidates(target):
@@ -287,23 +304,32 @@ def _place(source: Path, target: Path, mode: str, placed_now: set[Path]) -> tupl
                 # Anything else -- a single-link file, or the same entry -- means
                 # out_dir resolves back onto its own source: never delete.
                 if os.stat(source).st_nlink >= 2 and not _is_same_entry(source, candidate):
+                    _set_mtime(candidate, mtime)  # an interrupted run may not have dated it
                     if mode == "move":
                         _remove(source)
-                    return "present", candidate
+                    return "present", candidate, False
                 raise FilesExportError(
                     "the output folder must not be inside or contain a scanned "
                     f"category folder: {candidate} is {source}"
                 )
             if candidate.is_file() and _identical(source, candidate):
+                if candidate in placed_now:
+                    status = "merged"  # dated when it was placed earlier in this run
+                else:
+                    status = "present"
+                    _set_mtime(candidate, mtime)  # an interrupted run may not have dated it
                 if mode == "move":
                     _remove(source)  # only after proving the target holds the same bytes
-                return ("merged" if candidate in placed_now else "present"), candidate
+                return status, candidate, False
             conflict = True
             continue
         candidate.parent.mkdir(parents=True, exist_ok=True)
         if _commit(source, candidate, mode):
             placed_now.add(candidate)
-            return ("conflict" if conflict else "placed"), candidate
+            dated = _set_mtime(candidate, mtime)  # before the source is removed
+            if mode == "move":
+                _remove(source)  # only after the commit at ``candidate`` succeeded
+            return ("conflict" if conflict else "placed"), candidate, dated
         conflict = True  # taken by someone else since the existence check above
     raise AssertionError("unreachable")
 
@@ -342,6 +368,10 @@ def _check_no_overlap(scan_dir: Path, out_dir: Path, categories: list[str]) -> N
     via ``os.path.samefile`` along whichever side's ancestors actually exist
     (``resolve()`` does not reliably normalize every such alias away).
     """
+    # Absolute paths, so the samefile ancestor walk reaches the real parents of a
+    # relative path (not just ".") without depending on resolve().
+    out_dir = out_dir.absolute()
+    scan_dir = scan_dir.absolute()
     out_resolved = out_dir.resolve()
     out_exists = out_dir.exists()
 
@@ -365,6 +395,19 @@ def _check_no_overlap(scan_dir: Path, out_dir: Path, categories: list[str]) -> N
             )
 
 
+def check_out_dir(scan_dir: Path, out_dir: Path) -> None:
+    """Raise ``FilesExportError`` if merging into ``out_dir`` is not safe (checked
+    before anything is written, e.g. by ``export all``)."""
+    _check_no_overlap(scan_dir, out_dir, found_categories(scan_dir))
+
+
+def _count_partials(out_dir: Path) -> int:
+    count = 0
+    for _, _, filenames in os.walk(out_dir):  # symlinked folders are not followed
+        count += sum(fnmatch.fnmatchcase(name, ".ssba-*.partial") for name in filenames)
+    return count
+
+
 def export_files(scan_dir: Path, out_dir: Path, mode: str) -> FilesExportResult:
     if mode not in ("copy", "move"):
         raise ValueError(f"unknown mode {mode!r}: expected 'copy' or 'move'")
@@ -375,14 +418,14 @@ def export_files(scan_dir: Path, out_dir: Path, mode: str) -> FilesExportResult:
     for item in plan.files:
         target = out_dir.joinpath(*item.target.parts)
         try:
-            status, final = _place(item.source, target, mode, placed_now)
+            status, _, dated = _place(item.source, target, mode, placed_now, item.mtime)
         except OSError as exc:
             raise FilesExportError(f"cannot {mode} {item.source}: {exc}") from exc
         if status in ("placed", "conflict"):
             result.placed += 1
             result.conflicts += status == "conflict"
             result.originals += item.original
-            result.dated += _set_mtime(final, item.mtime)
+            result.dated += dated
         elif status == "merged":
             result.merged += 1
         else:
@@ -390,4 +433,5 @@ def export_files(scan_dir: Path, out_dir: Path, mode: str) -> FilesExportResult:
     if mode == "move":
         for category in plan.categories:
             _remove_empty_dirs(scan_dir / category)
+    result.leftover_partials = _count_partials(out_dir)
     return result
