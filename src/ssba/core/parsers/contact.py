@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import quopri
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import vobject
+
+from ssba.core.parsers.scan_report import ScanReportError, category_files
 
 # A card runs from a BEGIN:VCARD line to the first END:VCARD line with no other
 # BEGIN:VCARD line in between, so a truncated card cannot swallow the card after
@@ -18,7 +19,6 @@ _CARD_RE = re.compile(
     _BEGIN_LINE + r"(?:(?!" + _BEGIN_LINE + r").)*?^END:VCARD[ \t]*(?=\r?$)",
     re.DOTALL | re.IGNORECASE | re.MULTILINE,
 )
-_EXPORTABLE_STATUSES = {"decrypted", "plaintext_passthrough"}
 
 
 class ContactExportError(Exception):
@@ -319,62 +319,15 @@ def parse_cards(text: str) -> tuple[list[str], list[str]]:
 
 
 def find_contact_sources(scan_dir: Path) -> list[ContactSource]:
-    report_path = scan_dir / "report.json"
     try:
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise ContactExportError(f"report.json not found in {scan_dir}") from exc
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ContactExportError(f"report.json is not readable: {exc}") from exc
-
-    # Validate report structure: top level must be dict, categories must be list
-    if not isinstance(report, dict):
-        raise ContactExportError("report.json is not readable: top level is not an object")
-    categories = report.get("categories", [])
-    if not isinstance(categories, list):
-        raise ContactExportError("report.json is not readable: categories is not a list")
-
-    category = next(
-        (c for c in categories if isinstance(c, dict) and c.get("category") == "CONTACT"),
-        None,
-    )
-    if category is None:
-        raise ContactExportError("the scan report has no CONTACT category")
-
-    # Validate files is a list
-    files = category.get("files", [])
-    if not isinstance(files, list):
-        files = []
-
-    sources = []
-    contact_root = scan_dir / "CONTACT"
-    try:
-        contact_root_resolved = contact_root.resolve()
-    except (OSError, ValueError):
-        contact_root_resolved = contact_root
-
-    for entry in files:
-        # Skip non-dict entries
-        if not isinstance(entry, dict):
-            continue
-        rel = entry.get("path", "")
-        # Skip entries with non-string or empty paths
-        if not isinstance(rel, str) or not rel:
-            continue
-        if not rel.lower().endswith(".vcf") or entry.get("status") not in _EXPORTABLE_STATUSES:
-            continue
-        path = contact_root / rel
-        # Check that resolved path stays within contact_root (defense against path traversal)
-        try:
-            path_resolved = path.resolve()
-            if not path_resolved.is_relative_to(contact_root_resolved):
-                continue
-        except (OSError, ValueError):
-            continue
-        if not path.is_file():
-            continue
-        label = path.name
-        sources.append(ContactSource(path=path, label=label, is_profile=label.lower() == "profile.vcf"))
+        paths = category_files(scan_dir, "CONTACT")
+    except ScanReportError as exc:
+        raise ContactExportError(str(exc)) from exc
+    sources = [
+        ContactSource(path=path, label=path.name, is_profile=path.name.lower() == "profile.vcf")
+        for path in paths
+        if path.name.lower().endswith(".vcf")
+    ]
     sources.sort(key=lambda s: (not s.is_profile, s.label))
     return sources
 
