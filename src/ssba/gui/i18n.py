@@ -19,6 +19,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "p1_none": "No backup found in the usual Smart Switch folders. Use \u201cBrowse\u2026\u201d.",
         "p1_browse_backup": "Browse\u2026",
         "p1_backup_line": "{name} ({model}) \u2014 {date} \u2014 {size}",
+        "p1_backup_line_no_name": "{model} \u2014 {date} \u2014 {size}",
         "p1_scan_folder": "Already decrypted: {path}",
         "p1_save_to": "Save to:",
         "p1_browse_dest": "Browse\u2026",
@@ -28,6 +29,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "p1_dest_inside": "Choose a folder outside the backup: the backup itself is never changed.",
         "p1_dest_relative": "Choose a full path (for example C:\\Users\\You\\Documents\\...), not a relative one.",
         "p1_dest_unusable": "That folder cannot be used: {error}",
+        "p1_dest_not_empty": (
+            "The folder you chose already contains files. Files with the same names as the "
+            "recovered data (for example contacts.vcf) would be replaced. Use it anyway?"
+        ),
         "p1_low_space": "Only {free} are free on that disk; about {needed} are needed. Continue anyway?",
         "p1_reuse": "This folder already holds a decrypted copy of a backup. Use it? (No = decrypt again)",
         "p2_title": "Decrypting the backup",
@@ -111,9 +116,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "p1_title": "Scegli il backup",
         "p1_subtitle": "Scegli un backup di Smart Switch e la cartella dove salvare i dati recuperati.",
         "p1_found": "Backup trovati su questo PC:",
-        "p1_none": "Nessun backup trovato nelle cartelle abituali di Smart Switch. Usa \u201cSfoglia\u2026\u201d.",
+        "p1_none": "Nessun backup trovato nelle cartelle predefinite di Smart Switch. Usa \u201cSfoglia\u2026\u201d.",
         "p1_browse_backup": "Sfoglia\u2026",
         "p1_backup_line": "{name} ({model}) \u2014 {date} \u2014 {size}",
+        "p1_backup_line_no_name": "{model} \u2014 {date} \u2014 {size}",
         "p1_scan_folder": "Gi\u00e0 decifrato: {path}",
         "p1_save_to": "Salva in:",
         "p1_browse_dest": "Sfoglia\u2026",
@@ -123,6 +129,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "p1_dest_inside": "Scegli una cartella fuori dal backup: il backup non viene mai modificato.",
         "p1_dest_relative": "Scegli un percorso completo (ad esempio C:\\Utenti\\NomeUtente\\Documenti\\...), non relativo.",
         "p1_dest_unusable": "Quella cartella non pu\u00f2 essere usata: {error}",
+        "p1_dest_not_empty": (
+            "La cartella scelta contiene gi\u00e0 dei file. I file con lo stesso nome dei dati "
+            "recuperati (per esempio contacts.vcf) verrebbero sostituiti. Usarla comunque?"
+        ),
         "p1_low_space": "Su quel disco sono liberi solo {free}; ne servono circa {needed}. Continuare comunque?",
         "p1_reuse": "Questa cartella contiene gi\u00e0 una copia decifrata di un backup. Usarla? (No = decifra di nuovo)",
         "p2_title": "Decifratura del backup",
@@ -144,7 +154,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "p3_files_move": "Uniscili in un unico albero di cartelle del telefono (sposta)",
         "p3_files_move_help": "Spostare \u00e8 istantaneo sullo stesso disco e non occupa spazio; le cartelle delle categorie vengono svuotate.",
         "p4_title": "Recupero in corso",
-        "p4_subtitle": "Ogni tipo di dato viene salvato a s\u00e9: un errore in uno non ferma gli altri.",
+        "p4_subtitle": "Ogni tipo di dato viene salvato separatamente: un errore in uno non ferma gli altri.",
         "p4_stop": "Interrompi",
         "p4_confirm_stop": "Interrompere dopo il file in corso? Quello gi\u00e0 fatto resta.",
         "p4_row_waiting": "\u2022 {name}",

@@ -156,8 +156,8 @@ codes are only inside `<details>` elements.
   page. A test checks both dictionaries have
   the same keys.
 - `worker.py` — `Worker(QThread)` running a callable with a `CancelToken`,
-  relaying `Progress` through a Qt signal; signals `finished(result)`,
-  `failed(message)`, `cancelled()`.
+  relaying `Progress` through a Qt signal; signals `progressed(event)`,
+  `succeeded(result)`, `failed(message)`, `cancelled()`.
 - `wizard.py` — `QWizard` with the pages below; `pages/*.py` one module per
   page.
 
@@ -170,8 +170,10 @@ Pages:
    `Documents\SmartSwitch Recovery\<model>_<YYYY-MM-DD>`. Checks before
    **Next**:
    - the destination is not inside the backup folder;
-   - free space (`shutil.disk_usage`) ≥ 2 × backup size (warning dialog with
-     the numbers, "Continue anyway" / "Cancel");
+   - free space (`shutil.disk_usage`) ≥ 2 × backup size (low-space dialog:
+     Yes/No with a question text giving the free and needed amounts);
+   - a destination that already holds unrelated files (not a previous SSBA
+     run) is used only after a Yes/No confirmation;
    - a non-empty destination that already holds a scan is reused (the user
      is asked: reuse or start over).
 2. **Decryption** — runs `scan_backup` + `write_report` into

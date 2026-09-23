@@ -85,9 +85,12 @@ class RecoveryWizard(QWizard):
             self.page(page_id).retranslate()
 
     def reject(self) -> None:
-        worker = getattr(self.currentPage(), "worker", None)
-        if worker is not None and worker.isRunning() and not self.ask(tr("p4_confirm_stop")):
-            return
+        page = self.currentPage()
+        worker = getattr(page, "worker", None)
+        if worker is not None and worker.isRunning():
+            confirm_key = getattr(page, "confirm_key", "p4_confirm_stop")
+            if not self.ask(tr(confirm_key)):
+                return
         super().reject()
 
     # Dialogs and desktop actions: small methods so tests can replace them.

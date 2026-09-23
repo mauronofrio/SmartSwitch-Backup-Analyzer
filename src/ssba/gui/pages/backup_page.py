@@ -38,6 +38,17 @@ def _inside(path: Path, folder: Path) -> bool:
     return path.resolve().is_relative_to(folder.resolve())
 
 
+def _dest_has_foreign_files(dest: Path) -> bool:
+    """True if ``dest`` exists, is non-empty and holds no previous SSBA run."""
+    if not dest.is_dir():
+        return False
+    from ssba.gui.wizard import LOG_NAME
+
+    if (dest / "scan" / "report.json").is_file() or (dest / LOG_NAME).is_file():
+        return False
+    return any(dest.iterdir())
+
+
 class BackupPage(QWizardPage):
     def __init__(self, wizard) -> None:
         super().__init__()
@@ -92,13 +103,13 @@ class BackupPage(QWizardPage):
         self.backups.blockSignals(True)
         self.backups.clear()
         for info in self._infos:
-            self.backups.addItem(tr(
-                "p1_backup_line",
-                name=info.device_name or info.model,
-                model=info.model,
-                date=info.saved_at.strftime("%Y-%m-%d %H:%M") if info.saved_at else "?",
-                size=format_size(info.size),
-            ))
+            date = info.saved_at.strftime("%Y-%m-%d %H:%M") if info.saved_at else "?"
+            size = format_size(info.size)
+            if info.device_name:
+                text = tr("p1_backup_line", name=info.device_name, model=info.model, date=date, size=size)
+            else:
+                text = tr("p1_backup_line_no_name", model=info.model, date=date, size=size)
+            self.backups.addItem(text)
         self.backups.setCurrentRow(row)
         self.backups.blockSignals(False)
 
@@ -159,6 +170,8 @@ class BackupPage(QWizardPage):
         dest = Path(self.dest.text().strip()).expanduser()
         if not dest.is_absolute():
             self.w.warn(tr("p1_dest_relative"))
+            return False
+        if _dest_has_foreign_files(dest) and not self.w.ask(tr("p1_dest_not_empty")):
             return False
         if state.backup is not None:
             if _inside(dest, state.backup.path):

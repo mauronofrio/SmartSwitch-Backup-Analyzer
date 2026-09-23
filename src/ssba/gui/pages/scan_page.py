@@ -14,12 +14,15 @@ log = logging.getLogger("ssba.gui")
 
 
 def _decrypt(backup_path, scan_dir, progress, cancel):
+    (scan_dir / "report.json").unlink(missing_ok=True)
     report = scan_backup(backup_path, scan_dir, progress=progress, cancel=cancel)
     write_report(report, scan_dir)
     return report
 
 
 class ScanPage(QWizardPage):
+    confirm_key = "p2_confirm_stop"
+
     def __init__(self, wizard) -> None:
         super().__init__()
         self.w = wizard

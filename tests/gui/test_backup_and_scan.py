@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QWizard
 
 from ssba.gui import i18n
 from ssba.gui.wizard import PAGE_BACKUP, PAGE_CHOOSE, PAGE_SCAN, RecoveryWizard
+from tests.discovery_fixtures import write_history
 from tests.gui.gui_fixtures import build_backup
 
 
@@ -203,3 +204,126 @@ def test_finishing_the_wizard_closes_the_log_handler(wizard, tmp_path):
     assert any(getattr(h, "_ssba", False) for h in logger.handlers)
     wizard.done(QWizard.Rejected)
     assert not any(getattr(h, "_ssba", False) for h in logger.handlers)
+
+
+def test_a_non_empty_foreign_destination_is_refused_when_declined(wizard, tmp_path, monkeypatch):
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "old_file.txt").write_text("hello", encoding="utf-8")
+    page = wizard.page(PAGE_BACKUP)
+    page.dest.setText(str(dest))
+    monkeypatch.setattr(wizard, "ask", lambda text: wizard.asked.append(text) or False)
+    assert not page.validatePage()
+    assert wizard.asked == [i18n.tr("p1_dest_not_empty")]
+
+
+def test_a_non_empty_foreign_destination_is_accepted_when_confirmed(wizard, tmp_path):
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "old_file.txt").write_text("hello", encoding="utf-8")
+    page = wizard.page(PAGE_BACKUP)
+    page.dest.setText(str(dest))
+    assert page.validatePage()  # the fixture's ask() defaults to True
+    assert wizard.asked == [i18n.tr("p1_dest_not_empty")]
+
+
+def test_an_empty_destination_does_not_ask_about_foreign_files(wizard, tmp_path):
+    dest = tmp_path / "out"
+    dest.mkdir()
+    page = wizard.page(PAGE_BACKUP)
+    page.dest.setText(str(dest))
+    assert page.validatePage()
+    assert not wizard.asked
+
+
+def test_a_destination_that_is_a_previous_ssba_run_does_not_ask_about_foreign_files(wizard, tmp_path):
+    dest = tmp_path / "out"
+    (dest / "scan").mkdir(parents=True)
+    (dest / "scan" / "report.json").write_text('{"categories": []}', encoding="utf-8")
+    page = wizard.page(PAGE_BACKUP)
+    page.dest.setText(str(dest))
+    assert page.validatePage()
+    assert i18n.tr("p1_dest_not_empty") not in wizard.asked
+
+
+def test_the_already_decrypted_folder_path_also_protects_a_foreign_destination(wizard, tmp_path, monkeypatch):
+    old = tmp_path / "old"
+    decrypted = old / "decrypted"  # not named "scan": the folder.parent default is not itself a past run
+    decrypted.mkdir(parents=True)
+    (decrypted / "report.json").write_text('{"categories": []}', encoding="utf-8")
+    (old / "family_photo.jpg").write_text("data", encoding="utf-8")
+    monkeypatch.setattr(wizard, "choose_folder", lambda title: decrypted)
+    page = wizard.page(PAGE_BACKUP)
+    page.browse_backup.click()
+    assert page.dest.text() == str(old)
+    monkeypatch.setattr(wizard, "ask", lambda text: wizard.asked.append(text) or False)
+    assert not page.validatePage()
+    assert wizard.asked == [i18n.tr("p1_dest_not_empty")]
+
+
+def test_the_already_decrypted_folder_path_ignores_stray_files_of_its_own_previous_run(wizard, tmp_path, monkeypatch):
+    old = tmp_path / "old"
+    scan = old / "scan"
+    scan.mkdir(parents=True)
+    (scan / "report.json").write_text('{"categories": []}', encoding="utf-8")
+    (old / "stray.txt").write_text("hello", encoding="utf-8")
+    monkeypatch.setattr(wizard, "choose_folder", lambda title: scan)
+    page = wizard.page(PAGE_BACKUP)
+    page.browse_backup.click()
+    assert page.dest.text() == str(old)
+    assert page.validatePage()
+    assert not wizard.asked
+
+
+def test_backup_line_with_no_device_name_omits_the_duplicated_model(qtbot, tmp_path):
+    root = tmp_path / "root"
+    write_history(root / "SM-X" / "SM-X_" / "SM-X_1", name="", model="SM-X")
+    w = RecoveryWizard(roots=[root])
+    qtbot.addWidget(w)
+    page = w.page(PAGE_BACKUP)
+    text = page.backups.item(0).text()
+    assert text.startswith("SM-X \u2014")
+    assert "(SM-X)" not in text
+
+
+def test_stopping_the_scan_page_asks_with_its_own_stop_text(wizard, qtbot, tmp_path, monkeypatch):
+    from ssba.gui.pages import scan_page
+
+    def blocking_scan(backup_path, scan_dir, progress, cancel):
+        while True:
+            cancel.check()
+            time.sleep(0.01)
+
+    monkeypatch.setattr(scan_page, "scan_backup", blocking_scan)
+    wizard.page(PAGE_BACKUP).dest.setText(str(tmp_path / "out"))
+    wizard.next()
+    assert wizard.currentId() == PAGE_SCAN
+    scan = wizard.page(PAGE_SCAN)
+    assert scan.worker.isRunning()
+
+    asked = []
+    monkeypatch.setattr(wizard, "ask", lambda text: asked.append(text) or True)
+    wizard.reject()
+    assert asked == [i18n.tr("p2_confirm_stop")]
+
+
+def test_a_stopped_rescan_does_not_leave_a_stale_report(wizard, qtbot, tmp_path, monkeypatch):
+    from ssba.core.progress import OperationCancelled
+    from ssba.gui.pages import scan_page
+
+    dest = tmp_path / "out"
+    scan_dir = dest / "scan"
+    scan_dir.mkdir(parents=True)
+    (scan_dir / "report.json").write_text("stale", encoding="utf-8")
+
+    def instantly_cancelled(backup_path, scan_dir, progress, cancel):
+        raise OperationCancelled()
+
+    monkeypatch.setattr(scan_page, "scan_backup", instantly_cancelled)
+    monkeypatch.setattr(wizard, "ask", lambda text: False)  # "decrypt again" at the reuse prompt
+    wizard.page(PAGE_BACKUP).dest.setText(str(dest))
+    wizard.next()
+    assert wizard.currentId() == PAGE_SCAN
+    scan = wizard.page(PAGE_SCAN)
+    qtbot.waitUntil(lambda: not scan.worker.isRunning(), timeout=20000)
+    assert not (scan_dir / "report.json").is_file()
