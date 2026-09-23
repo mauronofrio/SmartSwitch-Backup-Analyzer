@@ -4,10 +4,15 @@ import json
 
 from ssba.cli.main import run
 from ssba.core.crypto import derive_key
+from tests.browser_fixtures import build_browser_scan_dir
 from tests.call_fixtures import build_call_scan_dir
+from tests.clipboard_fixtures import build_clipboard_scan_dir
+from tests.clock_fixtures import build_clock_scan_dir
 from tests.contact_fixtures import build_scan_dir
 from tests.crypto_helpers import encrypt_dummy_ecb, encrypt_iv_prefixed
 from tests.message_fixtures import build_message_scan_dir
+from tests.test_blocked_export import build_blocked_scan_dir
+from tests.wifi_fixtures import build_wifi_scan_dir
 
 FAKE_DUMMY = "AABBCCDDEEFF00112233445566778899AABB"
 KEY = derive_key(FAKE_DUMMY)
@@ -202,3 +207,83 @@ def test_export_calls_unwritable_out(tmp_path, capsys):
     exit_code = run(["export", "calls", str(scan_dir), "--out", str(out)])
     assert exit_code == 1
     assert capsys.readouterr().err.startswith("error: cannot write")
+
+
+def test_export_wifi_success_warns_about_passwords(tmp_path, capsys):
+    scan_dir = build_wifi_scan_dir(tmp_path / "scan")
+    out = tmp_path / "wifi.html"
+    assert run(["export", "wifi", str(scan_dir), "--out", str(out)]) == 0
+    captured = capsys.readouterr()
+    assert f"3 Wi-Fi networks written to {out} (2 with a password)" in captured.out
+    assert f"warning: {out} contains Wi-Fi passwords in clear text" in captured.err
+
+
+def test_export_blocked_numbers_success(tmp_path, capsys):
+    scan_dir = build_blocked_scan_dir(tmp_path / "scan")
+    out = tmp_path / "blocked.txt"
+    assert run(["export", "blocked-numbers", str(scan_dir), "--out", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert f"4 blocked numbers written to {out}" in printed
+    assert "1 rows without a number skipped" in printed
+
+
+def test_export_browser_success(tmp_path, capsys):
+    scan_dir = build_browser_scan_dir(tmp_path / "scan")
+    out = tmp_path / "browser"
+    assert run(["export", "browser", str(scan_dir), "--out", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert f"3 bookmarks in 2 folders and 2 quick access items written to {out / 'bookmarks.html'}" in printed
+    assert f"3 visited sites and 2 downloads written to {out / 'history.html'}" in printed
+    assert "2 entries without an address skipped" in printed
+
+
+def test_export_clipboard_success(tmp_path, capsys):
+    scan_dir = build_clipboard_scan_dir(tmp_path / "scan")
+    out = tmp_path / "clipboard"
+    assert run(["export", "clipboard", str(scan_dir), "--out", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert f"3 texts and 5 images written to {out / 'index.html'}" in printed
+    assert "1 clipboard images were missing from the backup" in printed
+    assert "1 entries of an unknown type included as text" in printed
+
+
+def test_export_clock_success(tmp_path, capsys):
+    scan_dir = build_clock_scan_dir(tmp_path / "scan")
+    out = tmp_path / "clock.html"
+    assert run(["export", "clock", str(scan_dir), "--out", str(out)]) == 0
+    assert f"3 alarms, 2 timers and 2 world clock cities written to {out}" in capsys.readouterr().out
+
+
+def test_new_exports_report_errors_on_stderr(tmp_path, capsys):
+    for kind in ("wifi", "blocked-numbers", "browser", "clipboard", "clock"):
+        assert run(["export", kind, str(tmp_path), "--out", str(tmp_path / "x")]) == 1
+        assert capsys.readouterr().err.startswith("error: ")
+
+
+def test_export_all_runs_every_kind_and_continues_past_failures(tmp_path, capsys):
+    scan_dir = build_call_scan_dir(tmp_path / "scan")
+    build_wifi_scan_dir(scan_dir)
+    out = tmp_path / "all"
+
+    assert run(["export", "all", str(scan_dir), "--out", str(out)]) == 0
+
+    captured = capsys.readouterr()
+    for kind in ("contacts", "messages", "calls", "wifi", "blocked-numbers", "browser", "clipboard", "clock"):
+        assert f"== {kind} ==" in captured.out
+    assert "error: the scan report has no CONTACT category" in captured.err
+    assert (out / "calls.xml").is_file()
+    assert (out / "wifi.html").is_file()
+    assert f"2 of 8 exports written to {out}" in captured.out
+
+
+def test_export_all_without_report_runs_nothing(tmp_path, capsys):
+    assert run(["export", "all", str(tmp_path), "--out", str(tmp_path / "all")]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: report.json not found")
+    assert "==" not in captured.out
+
+
+def test_export_all_with_nothing_exportable_fails(tmp_path, capsys):
+    (tmp_path / "report.json").write_text('{"categories": []}', encoding="utf-8")
+    assert run(["export", "all", str(tmp_path), "--out", str(tmp_path / "all")]) == 1
+    assert "0 of 8 exports written" in capsys.readouterr().out

@@ -8,9 +8,14 @@ import sys
 from pathlib import Path
 
 from ssba.core.errors import UnsupportedBackupError
+from ssba.core.parsers.blocked import BlockedExportError, export_blocked_numbers
+from ssba.core.parsers.browser import BrowserExportError, export_browser
 from ssba.core.parsers.calls import CallExportError, export_calls
+from ssba.core.parsers.clipboard import ClipboardExportError, export_clipboard
+from ssba.core.parsers.clock import ClockExportError, export_clock
 from ssba.core.parsers.contact import ContactExportError, export_contacts
 from ssba.core.parsers.messages import MessageExportError, export_messages
+from ssba.core.parsers.wifi import WifiExportError, export_wifi
 from ssba.core.scanner import scan_backup
 
 
@@ -45,34 +50,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "export", help="turn `ssba scan` output into files you can import elsewhere"
     )
     export_kinds = export_parser.add_subparsers(dest="export_kind", required=True)
-    contacts_parser = export_kinds.add_parser(
-        "contacts", help="merge the recovered contacts into one vCard 3.0 file"
+    exports = (
+        ("contacts", "merge the recovered contacts into one vCard 3.0 file", "the .vcf file to write"),
+        ("messages", "write the recovered text messages as SMS Backup & Restore XML", "the .xml file to write"),
+        ("calls", "write the recovered call log as SMS Backup & Restore XML", "the .xml file to write"),
+        ("wifi", "list the saved Wi-Fi networks with passwords and QR codes", "the .html file to write"),
+        ("blocked-numbers", "list the blocked phone numbers", "the .txt file to write"),
+        ("browser", "export Samsung Internet bookmarks and history", "the directory to write"),
+        ("clipboard", "export the keyboard clipboard texts and images", "the directory to write"),
+        ("clock", "list alarms, timers and world clock cities", "the .html file to write"),
+        ("all", "run every export above into one directory", "the directory to write"),
     )
-    contacts_parser.add_argument(
-        "scan_dir", type=Path, help="directory written by `ssba scan --out`"
-    )
-    contacts_parser.add_argument(
-        "--out", type=Path, required=True, help="path of the .vcf file to write"
-    )
-
-    messages_parser = export_kinds.add_parser(
-        "messages", help="write the recovered text messages as SMS Backup & Restore XML"
-    )
-    messages_parser.add_argument(
-        "scan_dir", type=Path, help="directory written by `ssba scan --out`"
-    )
-    messages_parser.add_argument(
-        "--out", type=Path, required=True, help="path of the .xml file to write"
-    )
-    calls_parser = export_kinds.add_parser(
-        "calls", help="write the recovered call log as SMS Backup & Restore XML"
-    )
-    calls_parser.add_argument(
-        "scan_dir", type=Path, help="directory written by `ssba scan --out`"
-    )
-    calls_parser.add_argument(
-        "--out", type=Path, required=True, help="path of the .xml file to write"
-    )
+    for name, help_text, out_help in exports:
+        kind_parser = export_kinds.add_parser(name, help=help_text)
+        kind_parser.add_argument(
+            "scan_dir", type=Path, help="directory written by `ssba scan --out`"
+        )
+        kind_parser.add_argument("--out", type=Path, required=True, help=out_help)
 
     return parser
 
@@ -134,6 +128,110 @@ def _run_export_calls(scan_dir: Path, out: Path) -> int:
     return 0
 
 
+def _run_export_wifi(scan_dir: Path, out: Path) -> int:
+    try:
+        result = export_wifi(scan_dir, out)
+    except WifiExportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"{result.networks} Wi-Fi networks written to {out} "
+        f"({result.with_password} with a password)"
+    )
+    if result.skipped:
+        print(f"{result.skipped} network entries without a name skipped")
+    print(f"warning: {out} contains Wi-Fi passwords in clear text", file=sys.stderr)
+    return 0
+
+
+def _run_export_blocked_numbers(scan_dir: Path, out: Path) -> int:
+    try:
+        result = export_blocked_numbers(scan_dir, out)
+    except BlockedExportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"{result.exported} blocked numbers written to {out}")
+    if result.skipped:
+        print(f"{result.skipped} rows without a number skipped")
+    return 0
+
+
+def _run_export_browser(scan_dir: Path, out: Path) -> int:
+    try:
+        result = export_browser(scan_dir, out)
+    except BrowserExportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"{result.bookmarks} bookmarks in {result.folders} folders and "
+        f"{result.quick_access} quick access items written to {out / 'bookmarks.html'}"
+    )
+    print(
+        f"{result.history} visited sites and {result.downloads} downloads "
+        f"written to {out / 'history.html'}"
+    )
+    if result.skipped:
+        print(f"{result.skipped} entries without an address skipped")
+    return 0
+
+
+def _run_export_clipboard(scan_dir: Path, out: Path) -> int:
+    try:
+        result = export_clipboard(scan_dir, out)
+    except ClipboardExportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"{result.texts} texts and {result.images} images written to {out / 'index.html'}")
+    if result.missing_images:
+        print(f"{result.missing_images} clipboard images were missing from the backup")
+    if result.other_types:
+        print(f"{result.other_types} entries of an unknown type included as text")
+    return 0
+
+
+def _run_export_clock(scan_dir: Path, out: Path) -> int:
+    try:
+        result = export_clock(scan_dir, out)
+    except ClockExportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"{result.alarms} alarms, {result.timers} timers and "
+        f"{result.cities} world clock cities written to {out}"
+    )
+    return 0
+
+
+# Every kind `export all` runs, in order, with the name it writes inside --out.
+_ALL_EXPORTS = (
+    ("contacts", _run_export_contacts, "contacts.vcf"),
+    ("messages", _run_export_messages, "sms.xml"),
+    ("calls", _run_export_calls, "calls.xml"),
+    ("wifi", _run_export_wifi, "wifi.html"),
+    ("blocked-numbers", _run_export_blocked_numbers, "blocked-numbers.txt"),
+    ("browser", _run_export_browser, "browser"),
+    ("clipboard", _run_export_clipboard, "clipboard"),
+    ("clock", _run_export_clock, "clock.html"),
+)
+
+
+def _run_export_all(scan_dir: Path, out: Path) -> int:
+    if not (scan_dir / "report.json").is_file():
+        print(f"error: report.json not found in {scan_dir}", file=sys.stderr)
+        return 1
+    written = 0
+    for name, runner, target in _ALL_EXPORTS:
+        print(f"== {name} ==")
+        if runner(scan_dir, out / target) == 0:
+            written += 1
+    print(f"\n{written} of {len(_ALL_EXPORTS)} exports written to {out}")
+    return 0 if written else 1
+
+
+_EXPORT_RUNNERS = {name: runner for name, runner, _ in _ALL_EXPORTS}
+_EXPORT_RUNNERS["all"] = _run_export_all
+
+
 def run(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
@@ -166,14 +264,8 @@ def run(argv: list[str] | None = None) -> int:
         print(f"\nfull report written to {report_path}")
         return 0 if any_success else 1
 
-    if args.command == "export" and args.export_kind == "contacts":
-        return _run_export_contacts(args.scan_dir, args.out)
-
-    if args.command == "export" and args.export_kind == "messages":
-        return _run_export_messages(args.scan_dir, args.out)
-
-    if args.command == "export" and args.export_kind == "calls":
-        return _run_export_calls(args.scan_dir, args.out)
+    if args.command == "export":
+        return _EXPORT_RUNNERS[args.export_kind](args.scan_dir, args.out)
 
     return 1
 
