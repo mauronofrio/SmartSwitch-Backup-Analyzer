@@ -222,8 +222,11 @@ def _run_export_all(scan_dir: Path, out: Path) -> int:
     written = 0
     for name, runner, target in _ALL_EXPORTS:
         print(f"== {name} ==")
-        if runner(scan_dir, out / target) == 0:
-            written += 1
+        try:
+            if runner(scan_dir, out / target) == 0:
+                written += 1
+        except Exception as exc:  # an unexpected bug in one exporter must not stop the rest
+            print(f"error: {name} failed unexpectedly: {exc}", file=sys.stderr)
     print(f"\n{written} of {len(_ALL_EXPORTS)} exports written to {out}")
     return 0 if written else 1
 

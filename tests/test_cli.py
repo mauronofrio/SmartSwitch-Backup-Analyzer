@@ -276,6 +276,33 @@ def test_export_all_runs_every_kind_and_continues_past_failures(tmp_path, capsys
     assert f"2 of 8 exports written to {out}" in captured.out
 
 
+def test_export_all_continues_past_an_unexpected_exception(tmp_path, capsys, monkeypatch):
+    import ssba.cli.main as main_mod
+
+    scan_dir = build_call_scan_dir(tmp_path / "scan")
+    build_wifi_scan_dir(scan_dir)
+    out = tmp_path / "all"
+
+    def boom(scan_dir, out):
+        raise RuntimeError("kaboom")
+
+    patched = tuple(
+        (name, boom if name == "calls" else runner, target)
+        for name, runner, target in main_mod._ALL_EXPORTS
+    )
+    monkeypatch.setattr(main_mod, "_ALL_EXPORTS", patched)
+
+    exit_code = main_mod._run_export_all(scan_dir, out)
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "error: calls failed unexpectedly: kaboom" in captured.err
+    for kind in ("contacts", "messages", "calls", "wifi", "blocked-numbers", "browser", "clipboard", "clock"):
+        assert f"== {kind} ==" in captured.out
+    assert (out / "wifi.html").is_file()
+    assert "1 of 8 exports written to" in captured.out
+
+
 def test_export_all_without_report_runs_nothing(tmp_path, capsys):
     assert run(["export", "all", str(tmp_path), "--out", str(tmp_path / "all")]) == 1
     captured = capsys.readouterr()
