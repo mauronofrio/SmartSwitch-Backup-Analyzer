@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import zipfile
 from pathlib import Path
 
 EXPORTABLE_STATUSES = frozenset({"decrypted", "plaintext_passthrough"})
@@ -10,6 +11,10 @@ EXPORTABLE_STATUSES = frozenset({"decrypted", "plaintext_passthrough"})
 
 class ScanReportError(Exception):
     """Raised when report.json is missing, unreadable, or lacks the category."""
+
+
+class MissingCategoryError(ScanReportError):
+    """Raised when report.json has no entry for the requested category."""
 
 
 def category_files(scan_dir: Path, category: str) -> list[Path]:
@@ -37,7 +42,7 @@ def category_files(scan_dir: Path, category: str) -> list[Path]:
         None,
     )
     if entry is None:
-        raise ScanReportError(f"the scan report has no {category} category")
+        raise MissingCategoryError(f"the scan report has no {category} category")
 
     files = entry.get("files", [])
     if not isinstance(files, list):
@@ -68,3 +73,17 @@ def category_files(scan_dir: Path, category: str) -> list[Path]:
         if path.is_file():
             paths.append(path)
     return paths
+
+
+def category_zip(scan_dir: Path, category: str, member: str) -> Path | None:
+    """Return the first recovered file of ``category`` that is a ZIP holding ``member``."""
+    for path in category_files(scan_dir, category):
+        try:
+            if not zipfile.is_zipfile(path):
+                continue
+            with zipfile.ZipFile(path) as archive:
+                if member in archive.namelist():
+                    return path
+        except (OSError, zipfile.BadZipFile):
+            continue
+    return None

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import zipfile
 
 import pytest
 
-from ssba.core.parsers.scan_report import ScanReportError, category_files
+from ssba.core.parsers.scan_report import MissingCategoryError, ScanReportError, category_files, category_zip
 
 
 def _write_report(scan_dir, files, category="CALLLOG"):
@@ -75,3 +76,44 @@ def test_missing_category_raises_naming_it(tmp_path):
     _write_report(tmp_path, [], category="CONTACT")
     with pytest.raises(ScanReportError, match="the scan report has no GMMESSAGE category"):
         category_files(tmp_path, "GMMESSAGE")
+
+
+def test_missing_category_error_is_a_scan_report_error(tmp_path):
+    _write_report(tmp_path, [], category="CONTACT")
+    with pytest.raises(MissingCategoryError, match="the scan report has no WIFICONFIG category"):
+        category_files(tmp_path, "WIFICONFIG")
+    assert issubclass(MissingCategoryError, ScanReportError)
+
+
+def test_missing_report_is_not_a_missing_category(tmp_path):
+    with pytest.raises(ScanReportError) as info:
+        category_files(tmp_path, "CALLLOG")
+    assert not isinstance(info.value, MissingCategoryError)
+
+
+def _zip(path, members):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return path
+
+
+def test_category_zip_returns_the_first_zip_holding_the_member(tmp_path):
+    _touch(tmp_path / "CALLLOG" / "not-a-zip.bin")
+    _zip(tmp_path / "CALLLOG" / "other.zip", {"x.txt": b"x"})
+    wanted = _zip(tmp_path / "CALLLOG" / "backup.enc", {"databases/SBrowser.db": b"db"})
+    _zip(tmp_path / "CALLLOG" / "later.zip", {"databases/SBrowser.db": b"db"})
+    _write_report(tmp_path, [
+        {"path": "not-a-zip.bin", "status": "decrypted"},
+        {"path": "other.zip", "status": "decrypted"},
+        {"path": "backup.enc", "status": "decrypted"},
+        {"path": "later.zip", "status": "decrypted"},
+    ])
+    assert category_zip(tmp_path, "CALLLOG", "databases/SBrowser.db") == wanted
+
+
+def test_category_zip_without_a_match_returns_none(tmp_path):
+    _zip(tmp_path / "CALLLOG" / "other.zip", {"x.txt": b"x"})
+    _write_report(tmp_path, [{"path": "other.zip", "status": "decrypted"}])
+    assert category_zip(tmp_path, "CALLLOG", "databases/SBrowser.db") is None
