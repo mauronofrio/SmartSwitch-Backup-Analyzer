@@ -15,6 +15,7 @@ from ssba.core.parsers.clipboard import ClipboardExportError, export_clipboard
 from ssba.core.parsers.clock import ClockExportError, export_clock
 from ssba.core.parsers.contact import ContactExportError, export_contacts
 from ssba.core.parsers.messages import MessageExportError, export_messages
+from ssba.core.parsers.notes import NotesExportError, export_notes
 from ssba.core.parsers.wifi import WifiExportError, export_wifi
 from ssba.core.scanner import scan_backup
 
@@ -59,6 +60,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ("browser", "export Samsung Internet bookmarks and history", "the directory to write"),
         ("clipboard", "export the keyboard clipboard texts and images", "the directory to write"),
         ("clock", "list alarms, timers and world clock cities", "the .html file to write"),
+        ("notes", "export Samsung Notes as text files and attachments in folders", "the directory to write"),
         ("all", "run every export above into one directory", "the directory to write"),
     )
     for name, help_text, out_help in exports:
@@ -202,6 +204,35 @@ def _run_export_clock(scan_dir: Path, out: Path) -> int:
     return 0
 
 
+def _run_export_notes(scan_dir: Path, out: Path) -> int:
+    try:
+        result = export_notes(scan_dir, out)
+    except NotesExportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"{result.notes} notes written to {out} "
+        f"({result.text_notes} with text, {result.attachments} attachments)"
+    )
+    if result.trashed:
+        print(f"{result.trashed} notes from the trash in {out / 'Trash'}")
+    if result.preview_only:
+        print(f"{result.preview_only} notes only had a text preview (it may be cut short)")
+    if result.handwriting_only:
+        print(
+            f"{result.handwriting_only} notes contain only handwriting or drawings, "
+            "which cannot be exported"
+        )
+    if result.with_drawings:
+        print(f"{result.with_drawings} notes had handwriting or drawings that are not exported")
+    if result.missing_files:
+        print(
+            f"{result.missing_files} notes had no file in the backup "
+            "(title and saved text only)"
+        )
+    return 0
+
+
 # Every kind `export all` runs, in order, with the name it writes inside --out.
 _ALL_EXPORTS = (
     ("contacts", _run_export_contacts, "contacts.vcf"),
@@ -212,6 +243,7 @@ _ALL_EXPORTS = (
     ("browser", _run_export_browser, "browser"),
     ("clipboard", _run_export_clipboard, "clipboard"),
     ("clock", _run_export_clock, "clock.html"),
+    ("notes", _run_export_notes, "notes"),
 )
 
 

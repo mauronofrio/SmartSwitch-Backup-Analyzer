@@ -12,6 +12,7 @@ from tests.clock_fixtures import build_clock_scan_dir
 from tests.contact_fixtures import build_scan_dir
 from tests.crypto_helpers import encrypt_dummy_ecb, encrypt_iv_prefixed
 from tests.message_fixtures import build_message_scan_dir
+from tests.notes_fixtures import build_notes_scan_dir
 from tests.wifi_fixtures import build_wifi_scan_dir
 
 FAKE_DUMMY = "AABBCCDDEEFF00112233445566778899AABB"
@@ -268,12 +269,12 @@ def test_export_all_runs_every_kind_and_continues_past_failures(tmp_path, capsys
     assert run(["export", "all", str(scan_dir), "--out", str(out)]) == 0
 
     captured = capsys.readouterr()
-    for kind in ("contacts", "messages", "calls", "wifi", "blocked-numbers", "browser", "clipboard", "clock"):
+    for kind in ("contacts", "messages", "calls", "wifi", "blocked-numbers", "browser", "clipboard", "clock", "notes"):
         assert f"== {kind} ==" in captured.out
     assert "error: the scan report has no CONTACT category" in captured.err
     assert (out / "calls.xml").is_file()
     assert (out / "wifi.html").is_file()
-    assert f"2 of 8 exports written to {out}" in captured.out
+    assert f"2 of 9 exports written to {out}" in captured.out
 
 
 def test_export_all_continues_past_an_unexpected_exception(tmp_path, capsys, monkeypatch):
@@ -297,10 +298,10 @@ def test_export_all_continues_past_an_unexpected_exception(tmp_path, capsys, mon
     assert exit_code == 0
     captured = capsys.readouterr()
     assert "error: calls failed unexpectedly: kaboom" in captured.err
-    for kind in ("contacts", "messages", "calls", "wifi", "blocked-numbers", "browser", "clipboard", "clock"):
+    for kind in ("contacts", "messages", "calls", "wifi", "blocked-numbers", "browser", "clipboard", "clock", "notes"):
         assert f"== {kind} ==" in captured.out
     assert (out / "wifi.html").is_file()
-    assert "1 of 8 exports written to" in captured.out
+    assert "1 of 9 exports written to" in captured.out
 
 
 def test_export_all_without_report_runs_nothing(tmp_path, capsys):
@@ -313,4 +314,30 @@ def test_export_all_without_report_runs_nothing(tmp_path, capsys):
 def test_export_all_with_nothing_exportable_fails(tmp_path, capsys):
     (tmp_path / "report.json").write_text('{"categories": []}', encoding="utf-8")
     assert run(["export", "all", str(tmp_path), "--out", str(tmp_path / "all")]) == 1
-    assert "0 of 8 exports written" in capsys.readouterr().out
+    assert "0 of 9 exports written" in capsys.readouterr().out
+
+
+def test_export_notes_success(tmp_path, capsys):
+    scan_dir = build_notes_scan_dir(tmp_path / "scan")
+    out = tmp_path / "notes"
+    assert run(["export", "notes", str(scan_dir), "--out", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert f"7 notes written to {out} (4 with text, 3 attachments)" in printed
+    assert f"2 notes from the trash in {out / 'Trash'}" in printed
+    assert "2 notes only had a text preview (it may be cut short)" in printed
+    assert "1 notes contain only handwriting or drawings, which cannot be exported" in printed
+    assert "2 notes had handwriting or drawings that are not exported" in printed
+    assert "2 notes had no file in the backup (title and saved text only)" in printed
+
+
+def test_export_notes_error(tmp_path, capsys):
+    assert run(["export", "notes", str(tmp_path), "--out", str(tmp_path / "n")]) == 1
+    assert capsys.readouterr().err.startswith("error: report.json not found")
+
+
+def test_export_all_includes_notes(tmp_path, capsys):
+    scan_dir = build_notes_scan_dir(tmp_path / "scan")
+    out = tmp_path / "all"
+    assert run(["export", "all", str(scan_dir), "--out", str(out)]) == 0
+    assert (out / "notes" / "Uncategorized" / "Lista spesa.txt").is_file()
+    assert f"1 of 9 exports written to {out}" in capsys.readouterr().out
