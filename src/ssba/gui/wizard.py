@@ -78,10 +78,17 @@ class RecoveryWizard(QWizard):
         self.setButtonText(QWizard.CustomButton1, tr("lang_button"))
         self.setButtonText(QWizard.BackButton, tr("back"))
         self.setButtonText(QWizard.NextButton, tr("next"))
+        self.setButtonText(QWizard.CommitButton, tr("btn_start"))
         self.setButtonText(QWizard.CancelButton, tr("cancel"))
         self.setButtonText(QWizard.FinishButton, tr("finish"))
         for page_id in self.pageIds():
             self.page(page_id).retranslate()
+
+    def reject(self) -> None:
+        worker = getattr(self.currentPage(), "worker", None)
+        if worker is not None and worker.isRunning() and not self.ask(tr("p4_confirm_stop")):
+            return
+        super().reject()
 
     # Dialogs and desktop actions: small methods so tests can replace them.
     def ask(self, text: str) -> bool:

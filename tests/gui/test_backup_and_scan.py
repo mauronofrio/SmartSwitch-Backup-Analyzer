@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import pytest
 from PySide6.QtWidgets import QWizard
@@ -86,6 +87,32 @@ def test_decryption_runs_and_can_continue(wizard, qtbot, tmp_path):
     qtbot.waitUntil(scan.isComplete, timeout=20000)
     assert (tmp_path / "out" / "scan" / "report.json").is_file()
     assert (tmp_path / "out" / "ssba-gui.log").is_file()
+
+
+def test_closing_the_wizard_while_scanning_asks_first(wizard, qtbot, tmp_path, monkeypatch):
+    from ssba.gui.pages import scan_page
+
+    def blocking_scan(backup_path, scan_dir, progress, cancel):
+        while True:
+            cancel.check()
+            time.sleep(0.01)
+
+    monkeypatch.setattr(scan_page, "scan_backup", blocking_scan)
+    wizard.page(PAGE_BACKUP).dest.setText(str(tmp_path / "out"))
+    wizard.next()
+    assert wizard.currentId() == PAGE_SCAN
+    scan = wizard.page(PAGE_SCAN)
+    assert scan.worker.isRunning()
+
+    monkeypatch.setattr(wizard, "ask", lambda text: False)
+    wizard.reject()
+    assert wizard.isVisible()
+    assert scan.worker.isRunning()
+
+    monkeypatch.setattr(wizard, "ask", lambda text: True)
+    wizard.reject()
+    assert not scan.worker.isRunning()
+    assert not wizard.isVisible()
 
 
 def test_an_existing_scan_is_reused_and_decryption_skipped(wizard, qtbot, tmp_path):

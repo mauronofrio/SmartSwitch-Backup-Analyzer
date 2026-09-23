@@ -35,6 +35,10 @@ class ChoosePage(QWizardPage):
         layout.addLayout(self.list_layout)
         layout.addWidget(self.files_box)
         layout.addStretch(1)
+        self.files_keep.toggled.connect(self.completeChanged)
+        self.files_copy.toggled.connect(self.completeChanged)
+        self.files_move.toggled.connect(self.completeChanged)
+        self.setCommitPage(True)
 
     def initializePage(self) -> None:
         while (child := self.list_layout.takeAt(0)) is not None:
@@ -47,6 +51,7 @@ class ChoosePage(QWizardPage):
                 continue
             box = QCheckBox()
             box.setChecked(True)
+            box.toggled.connect(self.completeChanged)
             self.checks[export.key] = box
             self.list_layout.addWidget(box)
         self.w.state.files_available = any(e.key == "files" for e in self._exports)
@@ -83,3 +88,8 @@ class ChoosePage(QWizardPage):
         else:
             state.files_mode = "move" if self.files_move.isChecked() else "copy"
         return True
+
+    def isComplete(self) -> bool:
+        if any(box.isChecked() for box in self.checks.values()):
+            return True
+        return self.w.state.files_available and not self.files_keep.isChecked()

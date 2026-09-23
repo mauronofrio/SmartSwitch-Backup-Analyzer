@@ -37,6 +37,8 @@ class RunPage(QWizardPage):
         self._done = False
         self._exports = []
         self._running = ""
+        self._cancelled_row = ""
+        self._status_key = ""
         self.labels: dict[str, QLabel] = {}
         self.rows_layout = QVBoxLayout()
         self.bar = QProgressBar()
@@ -54,6 +56,7 @@ class RunPage(QWizardPage):
         self.setTitle(tr("p4_title"))
         self.setSubTitle(tr("p4_subtitle"))
         self.stop.setText(tr("p4_stop"))
+        self.status.setText(tr(self._status_key) if self._status_key else "")
         self._refresh_rows()
 
     def initializePage(self) -> None:
@@ -61,6 +64,15 @@ class RunPage(QWizardPage):
         state.outcomes = []
         self._done = False
         self._running = ""
+        self._cancelled_row = ""
+        self._status_key = ""
+        if self.worker is not None and not self.worker.isRunning():
+            for signal in (
+                self.worker.progressed, self.worker.succeeded, self.worker.failed, self.worker.cancelled,
+            ):
+                signal.disconnect()
+            self.worker.deleteLater()
+            self.worker = None
         keys = list(state.selected) + (["files"] if state.files_mode in ("copy", "move") else [])
         self._exports = [e for e in EXPORTS if e.key in keys]
         while (child := self.rows_layout.takeAt(0)) is not None:
@@ -81,9 +93,9 @@ class RunPage(QWizardPage):
         )
         self.worker = Worker(job, self)
         self.worker.progressed.connect(self._on_progress)
-        self.worker.succeeded.connect(lambda _outcomes: self._finish(tr("p4_done")))
+        self.worker.succeeded.connect(lambda _outcomes: self._finish("p4_done"))
         self.worker.failed.connect(self._on_failed)
-        self.worker.cancelled.connect(lambda: self._finish(tr("p4_cancelled")))
+        self.worker.cancelled.connect(lambda: self._finish("p4_cancelled"))
         self.worker.start()
 
     def _refresh_rows(self) -> None:
@@ -94,6 +106,8 @@ class RunPage(QWizardPage):
                 key = "p4_row_ok" if done[export.key].ok else "p4_row_error"
             elif export.key == self._running:
                 key = "p4_row_running"
+            elif export.key == self._cancelled_row:
+                key = "p4_row_cancelled"
             else:
                 key = "p4_row_waiting"
             self.labels[export.key].setText(tr(key, name=name))
@@ -107,8 +121,10 @@ class RunPage(QWizardPage):
             self.bar.setRange(0, event.total)
             self.bar.setValue(event.done)
 
-    def _finish(self, text: str) -> None:
+    def _finish(self, key: str) -> None:
         state = self.w.state
+        if key == "p4_cancelled" and self._running:
+            self._cancelled_row = self._running
         if state.files_mode == "keep" and state.files_available:
             state.outcomes.append(ExportOutcome("files", True, None, None, state.scan_dir))
         self._running = ""
@@ -116,12 +132,13 @@ class RunPage(QWizardPage):
         self.bar.setRange(0, 1)
         self.bar.setValue(1)
         self.stop.setEnabled(False)
-        self.status.setText(text)
+        self._status_key = key
+        self.status.setText(tr(key))
         self._done = True
         self.completeChanged.emit()
 
     def _on_failed(self, details: str) -> None:
-        self._finish(tr("p4_done"))
+        self._finish("p4_failed")
         self.w.show_error(details)
 
     def _stop(self) -> None:
