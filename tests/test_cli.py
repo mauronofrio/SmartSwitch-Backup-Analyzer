@@ -8,6 +8,7 @@ import pytest
 
 from ssba.cli.main import main, run
 from ssba.core.crypto import derive_key
+from tests.apps_fixtures import build_apps_scan_dir
 from tests.blocked_fixtures import build_blocked_scan_dir
 from tests.browser_fixtures import build_browser_scan_dir
 from tests.call_fixtures import build_call_scan_dir
@@ -15,6 +16,7 @@ from tests.clipboard_fixtures import build_clipboard_scan_dir
 from tests.clock_fixtures import build_clock_scan_dir
 from tests.contact_fixtures import build_scan_dir
 from tests.crypto_helpers import encrypt_dummy_ecb, encrypt_iv_prefixed
+from tests.files_fixtures import build_files_scan_dir
 from tests.message_fixtures import build_message_scan_dir
 from tests.notes_fixtures import build_notes_scan_dir
 from tests.wifi_fixtures import build_wifi_scan_dir
@@ -273,12 +275,12 @@ def test_export_all_runs_every_kind_and_continues_past_failures(tmp_path, capsys
     assert run(["export", "all", str(scan_dir), "--out", str(out)]) == 0
 
     captured = capsys.readouterr()
-    for kind in ("contacts", "messages", "calls", "wifi", "blocked-numbers", "browser", "clipboard", "clock", "notes"):
+    for kind in ("contacts", "messages", "calls", "wifi", "blocked-numbers", "browser", "clipboard", "clock", "notes", "apps", "files"):
         assert f"== {kind} ==" in captured.out
     assert "error: the scan report has no CONTACT category" in captured.err
     assert (out / "calls.xml").is_file()
     assert (out / "wifi.html").is_file()
-    assert f"2 of 9 exports written to {out}" in captured.out
+    assert f"2 of 11 exports written to {out}" in captured.out
 
 
 def test_export_all_continues_past_an_unexpected_exception(tmp_path, capsys, monkeypatch):
@@ -302,10 +304,10 @@ def test_export_all_continues_past_an_unexpected_exception(tmp_path, capsys, mon
     assert exit_code == 0
     captured = capsys.readouterr()
     assert "error: calls failed unexpectedly: kaboom" in captured.err
-    for kind in ("contacts", "messages", "calls", "wifi", "blocked-numbers", "browser", "clipboard", "clock", "notes"):
+    for kind in ("contacts", "messages", "calls", "wifi", "blocked-numbers", "browser", "clipboard", "clock", "notes", "apps", "files"):
         assert f"== {kind} ==" in captured.out
     assert (out / "wifi.html").is_file()
-    assert "1 of 9 exports written to" in captured.out
+    assert "1 of 11 exports written to" in captured.out
 
 
 def test_export_all_without_report_runs_nothing(tmp_path, capsys):
@@ -318,7 +320,7 @@ def test_export_all_without_report_runs_nothing(tmp_path, capsys):
 def test_export_all_with_nothing_exportable_fails(tmp_path, capsys):
     (tmp_path / "report.json").write_text('{"categories": []}', encoding="utf-8")
     assert run(["export", "all", str(tmp_path), "--out", str(tmp_path / "all")]) == 1
-    assert "0 of 9 exports written" in capsys.readouterr().out
+    assert "0 of 11 exports written" in capsys.readouterr().out
 
 
 def test_export_notes_success(tmp_path, capsys):
@@ -362,4 +364,64 @@ def test_export_all_includes_notes(tmp_path, capsys):
     out = tmp_path / "all"
     assert run(["export", "all", str(scan_dir), "--out", str(out)]) == 0
     assert (out / "notes" / "Uncategorized" / "Lista spesa.txt").is_file()
-    assert f"1 of 9 exports written to {out}" in capsys.readouterr().out
+    assert f"1 of 11 exports written to {out}" in capsys.readouterr().out
+
+
+def test_export_files_none_leaves_the_files_where_they_are(tmp_path, capsys):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "files"
+    assert run(["export", "files", str(scan_dir), "--out", str(out), "--mode", "none"]) == 0
+    assert (
+        f"files left in their category folders in {scan_dir}: Photo, Video, Docs, EtcFolder, PHOTO_ORIGIN"
+        in capsys.readouterr().out
+    )
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("mode, verb", [("copy", "copied"), ("move", "moved")])
+def test_export_files_merge(tmp_path, capsys, mode, verb):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "files"
+    assert run(["export", "files", str(scan_dir), "--out", str(out), "--mode", mode]) == 0
+    printed = capsys.readouterr().out
+    assert f"8 files {verb} into {out}" in printed
+    assert "1 duplicate files of the backup merged" in printed
+    assert f"2 originals of edited photos in {out / '_Edited photo originals'}" in printed
+    assert "4 files got their original date back" in printed
+    assert "1 files listed by Smart Switch were not found in the scan" in printed
+    assert "already there" not in printed
+    assert "different content" not in printed
+
+
+def test_export_files_requires_a_mode(tmp_path):
+    with pytest.raises(SystemExit):
+        run(["export", "files", str(tmp_path), "--out", str(tmp_path / "f")])
+
+
+def test_export_files_error(tmp_path, capsys):
+    assert run(["export", "files", str(tmp_path), "--out", str(tmp_path / "f"), "--mode", "copy"]) == 1
+    assert capsys.readouterr().err.startswith("error: report.json not found")
+
+
+def test_export_apps_success(tmp_path, capsys):
+    scan_dir = build_apps_scan_dir(tmp_path / "scan")
+    out = tmp_path / "apps.html"
+    assert run(["export", "apps", str(scan_dir), "--out", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert f"3 apps listed in {out}" in printed
+    assert "2 entries without a package skipped" in printed
+
+
+def test_export_all_merges_files_only_when_asked(tmp_path, capsys):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    build_apps_scan_dir(scan_dir)
+    out = tmp_path / "all"
+    assert run(["export", "all", str(scan_dir), "--out", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "files left in their category folders" in printed
+    assert not (out / "files").exists()
+    assert (out / "apps.html").is_file()
+    assert f"2 of 11 exports written to {out}" in printed
+
+    assert run(["export", "all", str(scan_dir), "--out", str(out), "--files", "copy"]) == 0
+    assert (out / "files" / "DCIM" / "Camera" / "a.jpg").is_file()

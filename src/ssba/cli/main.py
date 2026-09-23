@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import sys
 from pathlib import Path
 
 from ssba.core.errors import UnsupportedBackupError
+from ssba.core.parsers.apps import AppsExportError, export_apps
 from ssba.core.parsers.blocked import BlockedExportError, export_blocked_numbers
 from ssba.core.parsers.browser import BrowserExportError, export_browser
 from ssba.core.parsers.calls import CallExportError, export_calls
 from ssba.core.parsers.clipboard import ClipboardExportError, export_clipboard
 from ssba.core.parsers.clock import ClockExportError, export_clock
 from ssba.core.parsers.contact import ContactExportError, export_contacts
+from ssba.core.parsers.files import (
+    ORIGINALS_FOLDER,
+    FilesExportError,
+    export_files,
+    found_categories,
+)
 from ssba.core.parsers.messages import MessageExportError, export_messages
 from ssba.core.parsers.notes import NotesExportError, export_notes
 from ssba.core.parsers.wifi import WifiExportError, export_wifi
@@ -61,14 +69,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ("clipboard", "export the keyboard clipboard texts and images", "the directory to write"),
         ("clock", "list alarms, timers and world clock cities", "the .html file to write"),
         ("notes", "export Samsung Notes as text files and attachments in folders", "the directory to write"),
+        ("apps", "list the installed apps with Play Store links", "the .html file to write"),
+        ("files", "merge photos, videos, music and documents into one Android folder tree", "the directory to write"),
         ("all", "run every export above into one directory", "the directory to write"),
     )
+    kind_parsers = {}
     for name, help_text, out_help in exports:
         kind_parser = export_kinds.add_parser(name, help=help_text)
         kind_parser.add_argument(
             "scan_dir", type=Path, help="directory written by `ssba scan --out`"
         )
         kind_parser.add_argument("--out", type=Path, required=True, help=out_help)
+        kind_parsers[name] = kind_parser
+    kind_parsers["files"].add_argument(
+        "--mode",
+        choices=("none", "copy", "move"),
+        required=True,
+        help="move or copy the files into one Android tree, or leave them in their category folders",
+    )
+    kind_parsers["all"].add_argument(
+        "--files",
+        choices=("none", "copy", "move"),
+        default="none",
+        help="what `export files` does inside --out (default: none)",
+    )
 
     return parser
 
@@ -233,6 +257,54 @@ def _run_export_notes(scan_dir: Path, out: Path) -> int:
     return 0
 
 
+def _run_export_apps(scan_dir: Path, out: Path) -> int:
+    try:
+        result = export_apps(scan_dir, out)
+    except AppsExportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"{result.apps} apps listed in {out}")
+    if result.skipped:
+        print(f"{result.skipped} entries without a package skipped")
+    return 0
+
+
+def _run_export_files(scan_dir: Path, out: Path, mode: str) -> int:
+    if mode == "none":
+        try:
+            categories = found_categories(scan_dir)
+        except FilesExportError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"files left in their category folders in {scan_dir}: {', '.join(categories)}")
+        return 0
+    try:
+        result = export_files(scan_dir, out, mode)
+    except FilesExportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    verb = "moved" if mode == "move" else "copied"
+    print(f"{result.placed} files {verb} into {out}")
+    if result.merged:
+        print(f"{result.merged} duplicate files of the backup merged")
+    if result.already_present:
+        print(f"{result.already_present} files were already there")
+    if result.conflicts:
+        print(
+            f"{result.conflicts} files had the same path but different content; "
+            "kept as '<name> (2)'"
+        )
+    if result.originals:
+        print(f"{result.originals} originals of edited photos in {out / ORIGINALS_FOLDER}")
+    if result.dated:
+        print(f"{result.dated} files got their original date back")
+    if result.missing:
+        print(f"{result.missing} files listed by Smart Switch were not found in the scan")
+    if result.bad_manifests:
+        print(f"{result.bad_manifests} Smart Switch file lists could not be read")
+    return 0
+
+
 # Every kind `export all` runs, in order, with the name it writes inside --out.
 _ALL_EXPORTS = (
     ("contacts", _run_export_contacts, "contacts.vcf"),
@@ -244,27 +316,30 @@ _ALL_EXPORTS = (
     ("clipboard", _run_export_clipboard, "clipboard"),
     ("clock", _run_export_clock, "clock.html"),
     ("notes", _run_export_notes, "notes"),
+    ("apps", _run_export_apps, "apps.html"),
 )
 
 
-def _run_export_all(scan_dir: Path, out: Path) -> int:
+def _run_export_all(scan_dir: Path, out: Path, files_mode: str = "none") -> int:
     if not (scan_dir / "report.json").is_file():
         print(f"error: report.json not found in {scan_dir}", file=sys.stderr)
         return 1
+    jobs = list(_ALL_EXPORTS) + [
+        ("files", functools.partial(_run_export_files, mode=files_mode), "files"),
+    ]
     written = 0
-    for name, runner, target in _ALL_EXPORTS:
+    for name, runner, target in jobs:
         print(f"== {name} ==")
         try:
             if runner(scan_dir, out / target) == 0:
                 written += 1
         except Exception as exc:  # an unexpected bug in one exporter must not stop the rest
             print(f"error: {name} failed unexpectedly: {exc}", file=sys.stderr)
-    print(f"\n{written} of {len(_ALL_EXPORTS)} exports written to {out}")
+    print(f"\n{written} of {len(jobs)} exports written to {out}")
     return 0 if written else 1
 
 
 _EXPORT_RUNNERS = {name: runner for name, runner, _ in _ALL_EXPORTS}
-_EXPORT_RUNNERS["all"] = _run_export_all
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -300,6 +375,10 @@ def run(argv: list[str] | None = None) -> int:
         return 0 if any_success else 1
 
     if args.command == "export":
+        if args.export_kind == "all":
+            return _run_export_all(args.scan_dir, args.out, args.files)
+        if args.export_kind == "files":
+            return _run_export_files(args.scan_dir, args.out, args.mode)
         return _EXPORT_RUNNERS[args.export_kind](args.scan_dir, args.out)
 
     return 1
