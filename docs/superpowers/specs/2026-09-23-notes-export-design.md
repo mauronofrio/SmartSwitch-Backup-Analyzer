@@ -123,8 +123,9 @@ src/ssba/cli/main.py             # export notes; export all runs 9 kinds
   case-insensitive) gets a leading `_` (a trailing one would leave
   `con.txt_` still reserved).
 - File names: base = `safe_name(title)`, then `base (2)`, `base (3)`… until
-  none of the note's file names is already used in that output folder
-  (case-insensitive). The note writes:
+  neither that base (claimed by another note) nor any of the note's file
+  names is already used in that output folder (case-insensitive) — so two
+  notes never share a base and never look like one note. The note writes:
   - `<base>.txt` when it has text **or** has no attachments;
   - its attachments as `<base><ext>`, `<base>_2<ext>`, `<base>_3<ext>`…
     (`<ext>` = the original suffix, lower-cased); an attachment name equal
