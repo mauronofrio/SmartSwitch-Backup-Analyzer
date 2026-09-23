@@ -1,6 +1,6 @@
 # Structured Extras Export (Phase 2, sub-project 2, part 2)
 
-Status: approved design, not yet implemented.
+Status: implemented.
 Date: 2026-09-23
 
 ## Purpose
@@ -44,7 +44,8 @@ What can be restored on a stock Android phone (from the spike):
    networks, all also present in part 1 with the same passwords.
 
 `wpa_supplicant.conf` in the same folder is a copy of part 1. Real data:
-40 networks, 26 with a password, 3 hidden, no WEP or EAP, no hex SSIDs.
+40 networks, 30 with a password, 2 hidden (3 hidden blocks), no WEP or EAP,
+no hex SSIDs.
 
 ### Blocked numbers — `CALLOGSETTING`
 
@@ -157,8 +158,9 @@ resources, so it works offline and nothing in the backup can run code.
 
 ### `wifi` — `ssba export wifi <scan_dir> --out <wifi.html>`
 
-- `WifiNetwork` dataclass: `ssid: str`, `security: str` (`"WPA"`, `"open"`
-  or `"other"`), `password: str | None`, `hidden: bool`.
+- `WifiNetwork` dataclass: `ssid: str`, `security: str` (`"WPA"`,
+  `"WPA-nopass"`, `"open"` or `"other"`), `password: str | None`,
+  `hidden: bool`.
 - `read_networks(scan_dir) -> tuple[list[WifiNetwork], int]` — networks and
   the number of blocks skipped:
   - Sources: `category_files(scan_dir, "WIFICONFIG")` whose text contains
@@ -175,18 +177,24 @@ resources, so it works offline and nothing in the backup can run code.
   - Blocks are grouped by SSID in first-seen order. `password` = first
     non-empty `psk`. `hidden` = any block has `scan_ssid=1`.
     `security`: `"other"` if any block has `key_mgmt` containing `EAP` or a
-    `wep_key0`; else `"WPA"` if there is a password; else `"open"`.
+    key starting with `wep_key` (any index, not only `wep_key0`); else
+    `"WPA"` if there is a password; else `"WPA-nopass"` if any block's
+    `key_mgmt` (upper-cased, space-split) contains `WPA-PSK`, `SAE`,
+    `WPA-PSK-SHA256` or `FT-PSK` — the network is protected but the
+    password was not recovered; else `"open"`.
 - `qr_payload(network) -> str | None` (ZXing `WIFI:` format; `None` for
-  `"other"`). Special characters `\ ; , : "` in SSID and password are
-  escaped with a backslash:
+  `"other"` and for `"WPA-nopass"` — a `nopass` QR would create a useless
+  open network profile). Special characters `\ ; , : "` in SSID and
+  password are escaped with a backslash:
   - WPA: `WIFI:T:WPA;S:<ssid>;P:<password>;` + `H:true;` if hidden + `;`
   - open: `WIFI:T:nopass;S:<ssid>;` + `H:true;` if hidden + `;`
 - `export_wifi(scan_dir, out_path) -> WifiExportResult` (`networks`,
   `with_password`, `skipped`). Page: one table row per network — SSID,
-  security (`WPA/WPA2/WPA3`, `Open`, `Other (EAP/WEP)`), password (or `—`),
-  hidden (`yes`/`no`), QR code as inline SVG (`segno.make(payload,
-  error="m", micro=False).svg_inline(scale=4)`) or `—`. A note at the top
-  says the page contains passwords.
+  security (`WPA/WPA2/WPA3`, `WPA (password not in backup)`, `Open`,
+  `Other (EAP/WEP)`), password (or `—`), hidden (`yes`/`no`), QR code as
+  inline SVG (`segno.make(payload, error="m",
+  micro=False).svg_inline(scale=4)`) or `—`. A note at the top says the
+  page contains passwords.
 - `WifiExportError`: category/report errors, no network found, write
   failure (`cannot write …`).
 
@@ -230,7 +238,11 @@ resources, so it works offline and nothing in the backup can run code.
     `Untitled folder`.
   - Quick access items (`deleted` = 0, ordered by `position`) go in a
     top-level folder `Quick access`, after the tree; empty `url` → skipped.
-  - Titles and URLs are escaped (`esc`).
+  - Titles and URLs are escaped with a bookmark-file-specific escaper, not
+    `esc`: Chrome's bookmark importer decodes only `&lt; &gt; &amp; &quot;
+    &#39;` and reads the file line by line, so `\r`/`\n` are first turned
+    into a space, then `html.escape(text, quote=False)`, then `"` →
+    `&quot;` and `'` → `&#39;` (not `&#x27;`).
 - `history.html` (read-only): "Visited sites" table (last visit, title,
   `safe_link(url)`, visit count), ordered by last visit, newest first; and
   "Downloads" table (start time, file = `target_path`, source URL = the
@@ -249,7 +261,7 @@ resources, so it works offline and nothing in the backup can run code.
     empty — its `html` shown as escaped source;
   - each file member under `clipboard/<folder>/`: an image, dated by
     `<folder>` when it is an integer of milliseconds, else undated.
-  - A type-2 row whose `clipboard/<time_stamp>/clip` member is missing →
+  - A type-2 row whose `clipboard/<time_stamp>/` folder has no member →
     listed as "image missing" and counted in `missing_images`.
   - Rows of any other type → listed with their type and text, counted in
     `other_types`.
@@ -296,7 +308,12 @@ resources, so it works offline and nothing in the backup can run code.
     `contacts.vcf`, `sms.xml`, `calls.xml`, `wifi.html`,
     `blocked-numbers.txt`, `browser/`, `clipboard/`, `clock.html`, printing
     `== <kind> ==` before each. A failing kind prints its usual `error: …`
-    and the run continues.
+    and the run continues. Each kind also runs inside a
+    `try/except Exception`: an unexpected exception from a runner (a bug,
+    not a module's own export error) prints
+    `error: <kind> failed unexpectedly: <exc>` on stderr, counts as not
+    written, and the remaining kinds still run — one exporter's crash must
+    never stop `export all`.
   - Ends with `<n> of 8 exports written to <dir>`; exit 0 if at least one
     succeeded, else 1.
 
@@ -327,11 +344,11 @@ Fabricated data only. Per module:
   (exit 1), and with nothing exportable (exit 1).
 
 Manual, local-only validation on the real scan (outputs under the
-git-ignored `out/`): 40 networks (26 with password, 3 hidden) and each QR
+git-ignored `out/`): 40 networks (30 with password, 2 hidden) and each QR
 payload re-derived from the source; 5 blocked numbers; 3 bookmarks in 2
-folders + 10 quick access; 696 history rows, 440 downloads; 56 clip rows +
-687 images written and byte-identical to the ZIP members; 1 alarm,
-3 timers, 2 cities; `export all` → 8 of 8.
+folders + 10 quick access; 696 history rows, 440 downloads; 48 text/HTML
+entries and 8 image rows + 687 images written and byte-identical to the ZIP
+members; 1 alarm, 3 timers, 2 cities; `export all` → 8 of 8.
 
 ## Constraints
 
