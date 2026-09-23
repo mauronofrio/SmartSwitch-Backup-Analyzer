@@ -247,8 +247,8 @@ resources, so it works offline and nothing in the backup can run code.
 - Entries:
   - each `clip_table` row of type 1 or 4: its `text`, or — when `text` is
     empty — its `html` shown as escaped source;
-  - each `clipboard/<ms>/clip` member: an image, dated by `<ms>`
-    (non-integer folder name → dated by the row, else undated).
+  - each file member under `clipboard/<folder>/`: an image, dated by
+    `<folder>` when it is an integer of milliseconds, else undated.
   - A type-2 row whose `clipboard/<time_stamp>/clip` member is missing →
     listed as "image missing" and counted in `missing_images`.
   - Rows of any other type → listed with their type and text, counted in

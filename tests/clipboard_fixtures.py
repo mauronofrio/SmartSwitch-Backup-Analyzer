@@ -32,7 +32,9 @@ IMAGES = {
 }
 
 
-def build_clipboard_scan_dir(scan_dir: Path, *, rows=ROWS, images=IMAGES) -> Path:
+def build_clipboard_scan_dir(
+    scan_dir: Path, *, rows=ROWS, images=IMAGES, extra_members: dict[str, bytes] | None = None
+) -> Path:
     with tempfile.TemporaryDirectory() as tmp_name:
         db = Path(tmp_name) / "c.db"
         con = sqlite3.connect(db)
@@ -50,6 +52,8 @@ def build_clipboard_scan_dir(scan_dir: Path, *, rows=ROWS, images=IMAGES) -> Pat
         zf.writestr("BackupClipItem.db", db_bytes)
         for folder, data in images.items():
             zf.writestr(f"clipboard/{folder}/clip", data)
+        for member, data in (extra_members or {}).items():
+            zf.writestr(member, data)
     add_category(scan_dir, "CLIPBOARD", [
         entry("CLIPBOARD.zip/clipboard_backup_keyboard.zip", status="plaintext_passthrough", kind="zip"),
     ])

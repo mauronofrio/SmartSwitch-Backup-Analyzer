@@ -56,6 +56,16 @@ def test_texts_are_escaped_and_html_only_rows_show_their_source(tmp_path):
     assert "Type 9" in html
 
 
+def test_multiple_files_in_one_clip_folder_are_all_exported(tmp_path):
+    result, out = _export(tmp_path, extra_members={"clipboard/1700000004000/extra": PNG})
+    images = out / "images"
+    stamp = _stamp(1700000004000)
+    assert (images / f"{stamp}.jpg").read_bytes() == JPEG
+    assert (images / f"{stamp}.png").read_bytes() == PNG
+    assert result.images == 6  # 5 from the base fixture, plus the extra file in the same folder
+    assert result.missing_images == 1  # unchanged: row 5's folder still has no member at all
+
+
 def test_image_folder_that_is_not_a_timestamp_is_undated(tmp_path):
     result, out = _export(tmp_path, rows=[(1, 1700000001000, 1, "x", None)], images={"abc": JPEG})
     assert result.images == 1

@@ -117,18 +117,23 @@ def export_clipboard(scan_dir: Path, out_dir: Path) -> ClipboardExportResult:
     try:
         with zipfile.ZipFile(archive) as zf:
             rows = _read_rows(zf.read(_DB))
-            images: dict[str, str] = {}
+            # Every file under clipboard/<folder>/ is real clipboard content and must be
+            # exported, not just the first one found per folder.
+            image_members: list[tuple[str, str]] = []
+            folders_with_images: set[str] = set()
             for name in zf.namelist():
                 parts = PurePosixPath(name).parts
                 if len(parts) >= 3 and parts[0] == "clipboard" and not name.endswith("/"):
-                    images.setdefault(parts[1], name)
+                    image_members.append((parts[1], name))
+                    folders_with_images.add(parts[1])
+            image_members.sort(key=lambda pair: pair[1])
 
             for order, row in enumerate(rows):
                 ms = _ms(row["time_stamp"])
                 kind = row["type"]
                 if kind == _IMAGE_TYPE:
                     # The image itself is listed from its folder below.
-                    if _text(row["time_stamp"]) not in images:
+                    if _text(row["time_stamp"]) not in folders_with_images:
                         result.missing_images += 1
                         entries.append(_Entry(ms, order, '<p class="note">Image missing from the backup</p>'))
                     continue
@@ -142,7 +147,7 @@ def export_clipboard(scan_dir: Path, out_dir: Path) -> ClipboardExportResult:
                 body = text or _text(row["html"])
                 entries.append(_Entry(ms, order, f"<p><b>{esc(label)}</b></p><pre>{esc(body)}</pre>"))
 
-            for offset, (folder, member) in enumerate(sorted(images.items())):
+            for offset, (folder, member) in enumerate(image_members):
                 data = zf.read(member)
                 ms = _ms(folder)
                 extension = _extension(data)
