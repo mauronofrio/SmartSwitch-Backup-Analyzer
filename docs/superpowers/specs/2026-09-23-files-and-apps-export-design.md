@@ -114,17 +114,40 @@ src/ssba/cli/main.py             # export files --mode, export apps, export all 
 ### `files` — placing (`export_files(scan_dir, out_dir, mode)`)
 
 - `mode` is `"copy"` or `"move"`; anything else → `ValueError`.
+- Before placing anything: `out_dir` must not equal, sit inside, or contain
+  any scanned category folder (`Path.resolve()` on both sides, then
+  `is_relative_to` each way) — otherwise a planned target could resolve to
+  its own source, and `move` would delete the only copy. Violation →
+  `FilesExportError("the output folder must not be inside or contain a
+  scanned category folder: …")`.
 - For each planned file, target = `out_dir / <target path>`:
-  - target does not exist → copy (`shutil.copyfile`) or move
-    (`shutil.move`) the source there, creating parent folders;
+  - a candidate name that is a symlink is never followed or trusted — it is
+    always treated as occupied (the numbered-copy search moves on);
+  - target exists and is the very same file as the source
+    (`os.path.samefile`, a defense-in-depth check for the overlap case
+    above even if it somehow wasn't caught up front) → `FilesExportError`;
+    nothing is deleted;
   - target exists and is identical (same size and same SHA-256) → nothing is
     written; in `move` mode the source is deleted. Counted in `merged` when
     the target was placed earlier in this run (a backup duplicate), else in
     `already_present` (a re-run);
   - target exists and differs → the file goes to the first free
     `<stem> (2)<suffix>`, `<stem> (3)<suffix>`… (an identical one found there
-    counts as identical), counted in `conflicts`.
-  Existing files are never overwritten.
+    counts as identical), counted in `conflicts`;
+  - target is free → committed without ever writing to that final name
+    directly: `move` first tries a direct `os.link(source, candidate)`
+    (falling back to the copy path below only across volumes or where hard
+    links aren't supported); `copy`, and that fallback, stage the bytes in a
+    same-folder `<name>.ssba-partial` file (a stale one from an earlier
+    interrupted run is cleared first), then commit with a no-clobber
+    `os.link(partial, candidate)` followed by dropping the partial name (or
+    `os.rename` when the filesystem has no hard links). A name claimed by
+    someone else in between (`FileExistsError` from that `os.link`) is
+    treated like any other occupied candidate: the search moves to the next
+    numbered name.
+  Existing files are never overwritten, and an interruption never leaves a
+  truncated file under a final name — at most a stray `.ssba-partial` file,
+  which the next run clears before restaging.
 - After a file is placed, its modification time is set to its original date
   when known (`0 < t < 253402300800`; `OSError` ignored); counted in
   `dated`.
@@ -182,9 +205,17 @@ Fabricated category folders, manifests and files only.
   no category → error.
 - Placing, both modes: tree layout; byte-identical content; backup
   duplicates merged once (move deletes the duplicate source only after the
-  identity check); conflict → `(2)`; never overwrite; original dates set;
-  re-run in copy mode → `already_present`, nothing rewritten; move empties and
-  removes category folders but keeps what was not moved; invalid mode.
+  identity check, including a same-size-but-different-bytes case that a
+  size-only check would miss); conflict → `(2)`; never overwrite; original
+  dates set; re-run in copy mode → `already_present`, nothing rewritten;
+  move empties and removes category folders but keeps what was not moved;
+  invalid mode; `out_dir` equal to, inside, or containing a category folder
+  → rejected before anything is touched, sources left untouched; an
+  interrupted write leaves no file at the final name and a re-run then
+  places it at the plain name; a name claimed by someone else between the
+  existence check and the commit is not overwritten; a symlinked target is
+  treated as occupied (skipped on platforms that cannot create symlinks
+  without privilege).
 - Apps: sorting, fallbacks, skipped items, link escaping, page escaping,
   errors.
 - CLI: `files` each mode, `apps`, `export all` with default `none` and with
@@ -200,6 +231,9 @@ source, 16,231 dated; 129 apps.
 - Python 3.10+, no new dependency. `core/` never prints.
 - `move` only ever deletes a source after it has been moved or proven
   identical to the file already at the target. Existing output files are never
-  overwritten.
+  overwritten, and no write ever lands under a final name until it is
+  complete (staged in a same-folder `.ssba-partial` file, committed with a
+  no-clobber hard link). `out_dir` is checked up front against every
+  scanned category folder so a target can never resolve to its own source.
 - No real personal data in the repository, tests or fixtures.
 - No attribution lines in commits; nothing pushed; work on `master`.

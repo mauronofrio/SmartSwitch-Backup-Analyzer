@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import shutil
+from pathlib import Path
 
 import pytest
 
-from ssba.core.parsers.files import export_files
+from ssba.core.parsers.files import FilesExportError, export_files
 from tests.files_fixtures import FILES, T, build_files_scan_dir
 
 TREE = sorted([
@@ -103,3 +105,104 @@ def test_unknown_mode_raises(tmp_path):
     scan_dir = build_files_scan_dir(tmp_path / "scan")
     with pytest.raises(ValueError, match="mode"):
         export_files(scan_dir, tmp_path / "out", "none")
+
+
+def _assert_sources_untouched(scan_dir):
+    for category, files in FILES.items():
+        for rel, data in files.items():
+            assert (scan_dir / category / rel).read_bytes() == data
+
+
+def test_output_folder_matching_a_category_folder_is_rejected(tmp_path):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    with pytest.raises(FilesExportError, match="output folder"):
+        export_files(scan_dir, scan_dir / "Photo", "move")
+    _assert_sources_untouched(scan_dir)
+
+
+def test_output_folder_inside_a_category_folder_is_rejected(tmp_path):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    with pytest.raises(FilesExportError, match="output folder"):
+        export_files(scan_dir, scan_dir / "EtcFolder" / "sub", "move")
+    _assert_sources_untouched(scan_dir)
+
+
+def test_output_folder_containing_the_category_folders_is_rejected(tmp_path):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    with pytest.raises(FilesExportError, match="output folder"):
+        export_files(scan_dir, scan_dir, "move")
+    _assert_sources_untouched(scan_dir)
+
+
+def test_same_size_but_different_content_is_kept_as_a_numbered_copy_in_move_mode(tmp_path):
+    # "pdf" and "xyz" are the same length but differ byte for byte.
+    files = {**FILES, "EtcFolder": {"Download/doc.pdf": b"xyz", "Download/only.ics": b"ics"}}
+    scan_dir, out, result = _export(tmp_path, "move", files=files)
+    assert (out / "Download/doc.pdf").read_bytes() == b"pdf"
+    assert (out / "Download/doc (2).pdf").read_bytes() == b"xyz"
+    assert result.conflicts == 1
+    assert not (scan_dir / "EtcFolder/Download/doc.pdf").exists()
+
+
+def test_an_interrupted_copy_leaves_no_file_at_the_final_name(tmp_path, monkeypatch):
+    # shutil.copyfile takes a platform-specific fast path (e.g. Windows'
+    # _copyfileobj_readinto) that bypasses shutil.copyfileobj for non-empty
+    # files, so the interruption is simulated at the copyfile level itself.
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+    real_copyfile = shutil.copyfile
+
+    def flaky_copyfile(src, dst, *a, **kw):
+        if Path(dst).name.startswith("a.jpg"):
+            Path(dst).write_bytes(b"x")  # a truncated write, then the failure
+            raise OSError("simulated interruption")
+        return real_copyfile(src, dst, *a, **kw)
+
+    monkeypatch.setattr(shutil, "copyfile", flaky_copyfile)
+    with pytest.raises(FilesExportError):
+        export_files(scan_dir, out, "copy")
+    assert not (out / "DCIM/Camera/a.jpg").exists()
+    assert (scan_dir / "Photo/DCIM/Camera/a.jpg").exists()
+
+    monkeypatch.setattr(shutil, "copyfile", real_copyfile)
+    export_files(scan_dir, out, "copy")
+    assert (out / "DCIM/Camera/a.jpg").read_bytes() == b"photo-a"
+    assert not (out / "DCIM/Camera/a (2).jpg").exists()
+
+
+def test_a_target_created_by_someone_else_is_not_overwritten(tmp_path, monkeypatch):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+    real_link = os.link
+    fired = []
+
+    def racy_link(src, dst, *a, **kw):
+        if not fired and Path(dst).name == "a.jpg":
+            fired.append(True)
+            Path(dst).parent.mkdir(parents=True, exist_ok=True)
+            Path(dst).write_bytes(b"someone else")
+            raise FileExistsError()
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "link", racy_link)
+    export_files(scan_dir, out, "copy")
+    assert (out / "DCIM/Camera/a.jpg").read_bytes() == b"someone else"
+    assert (out / "DCIM/Camera/a (2).jpg").read_bytes() == b"photo-a"
+
+
+def test_a_symlinked_target_is_treated_as_occupied(tmp_path):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+    link_dir = out / "DCIM" / "Camera"
+    link_dir.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere.jpg"
+    elsewhere.write_bytes(b"elsewhere")
+    try:
+        (link_dir / "a.jpg").symlink_to(elsewhere)
+    except OSError:
+        pytest.skip("cannot create symlinks in this environment")
+
+    export_files(scan_dir, out, "copy")
+    assert (link_dir / "a.jpg").is_symlink()
+    assert elsewhere.read_bytes() == b"elsewhere"  # the symlink's target was left alone
+    assert (link_dir / "a (2).jpg").read_bytes() == b"photo-a"

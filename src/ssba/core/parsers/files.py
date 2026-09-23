@@ -174,6 +174,50 @@ def _candidates(target: Path):
         n += 1
 
 
+def _commit(source: Path, candidate: Path, mode: str) -> bool:
+    """Create ``candidate`` from ``source`` without ever truncating or overwriting it.
+
+    Returns True once ``candidate`` holds the file (``source`` is gone, in move
+    mode). Returns False if ``candidate`` turned out to be taken by someone else
+    between the existence check in ``_place`` and this call, so the caller falls
+    through to the next candidate name.
+    """
+    if mode == "move":
+        try:
+            os.link(source, candidate)
+        except FileExistsError:
+            return False  # the name was taken concurrently
+        except OSError:
+            pass  # cross-volume, or this filesystem has no hard links: fall back below
+        else:
+            source.unlink()  # only after the link at ``candidate`` succeeded
+            return True
+
+    # Never write straight to ``candidate``: stage the bytes in a same-folder
+    # ".ssba-partial" file, then move them into place with a no-clobber ``os.link``
+    # (it fails instead of overwriting) followed by dropping the partial name. A
+    # stale partial from an earlier interrupted run is cleared before restaging.
+    partial = candidate.with_name(candidate.name + ".ssba-partial")
+    if partial.exists() or partial.is_symlink():
+        partial.unlink()
+    shutil.copyfile(source, partial)
+    try:
+        os.link(partial, candidate)
+    except FileExistsError:
+        partial.unlink()
+        return False  # the name was taken concurrently
+    except OSError:
+        if candidate.exists() or candidate.is_symlink():
+            partial.unlink()
+            return False  # taken concurrently, and this filesystem has no hard links
+        os.rename(partial, candidate)  # no hard-link support, but the name is free
+    else:
+        partial.unlink()
+    if mode == "move":
+        source.unlink()  # only after the commit at ``candidate`` succeeded
+    return True
+
+
 def _place(source: Path, target: Path, mode: str, placed_now: set[Path]) -> tuple[str, Path]:
     """Put ``source`` at ``target`` (or a numbered free name), never overwriting.
 
@@ -181,19 +225,26 @@ def _place(source: Path, target: Path, mode: str, placed_now: set[Path]) -> tupl
     """
     conflict = False
     for candidate in _candidates(target):
-        if not candidate.exists():
-            candidate.parent.mkdir(parents=True, exist_ok=True)
-            if mode == "move":
-                shutil.move(str(source), str(candidate))
-            else:
-                shutil.copyfile(source, candidate)
+        if candidate.is_symlink():
+            conflict = True  # a symlinked target is never followed or trusted
+            continue
+        if candidate.exists():
+            if os.path.samefile(source, candidate):
+                raise FilesExportError(
+                    "the output folder must not be inside or contain a scanned "
+                    f"category folder: {candidate} is {source}"
+                )
+            if candidate.is_file() and _identical(source, candidate):
+                if mode == "move":
+                    source.unlink()  # only after proving the target holds the same bytes
+                return ("merged" if candidate in placed_now else "present"), candidate
+            conflict = True
+            continue
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        if _commit(source, candidate, mode):
             placed_now.add(candidate)
             return ("conflict" if conflict else "placed"), candidate
-        if candidate.is_file() and _identical(source, candidate):
-            if mode == "move":
-                source.unlink()  # only after proving the target holds the same bytes
-            return ("merged" if candidate in placed_now else "present"), candidate
-        conflict = True
+        conflict = True  # taken by someone else since the existence check above
     raise AssertionError("unreachable")
 
 
@@ -215,10 +266,27 @@ def _remove_empty_dirs(root: Path) -> None:
             pass  # not empty
 
 
+def _check_no_overlap(scan_dir: Path, out_dir: Path, categories: list[str]) -> None:
+    """Refuse an ``out_dir`` that would make a planned target equal its own source."""
+    out_resolved = out_dir.resolve()
+    for category in categories:
+        cat_resolved = (scan_dir / category).resolve()
+        if (
+            out_resolved == cat_resolved
+            or out_resolved.is_relative_to(cat_resolved)
+            or cat_resolved.is_relative_to(out_resolved)
+        ):
+            raise FilesExportError(
+                "the output folder must not be inside or contain a scanned "
+                f"category folder: {cat_resolved}"
+            )
+
+
 def export_files(scan_dir: Path, out_dir: Path, mode: str) -> FilesExportResult:
     if mode not in ("copy", "move"):
         raise ValueError(f"unknown mode {mode!r}: expected 'copy' or 'move'")
     plan = plan_files(scan_dir)
+    _check_no_overlap(scan_dir, out_dir, plan.categories)
     result = FilesExportResult(missing=plan.missing, bad_manifests=plan.bad_manifests)
     placed_now: set[Path] = set()
     for item in plan.files:
