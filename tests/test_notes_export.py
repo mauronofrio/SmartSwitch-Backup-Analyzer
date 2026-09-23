@@ -72,10 +72,31 @@ def test_files_carry_the_note_modification_time(tmp_path):
     assert abs(os.path.getmtime(out / "Lavoro/Contratto.pdf") - (T0 + 4000) / 1000) < 1
 
 
+def test_out_of_range_modification_time_does_not_stop_the_export(tmp_path):
+    notes = [("a", "Nota", None, b"testo", UNCAT, "1", 0, T0, 1_700_000_000_000_000)]
+    result, out = _export(tmp_path, notes=notes, index=[], media={})
+    assert result.notes == 1
+    assert (out / "Uncategorized/Nota.txt").is_file()
+
+
 def test_counts(tmp_path):
     result, _ = _export(tmp_path)
     assert (result.notes, result.text_notes, result.preview_only, result.attachments) == (7, 4, 2, 3)
     assert (result.handwriting_only, result.missing_files, result.with_drawings, result.trashed) == (1, 2, 2, 2)
+
+
+def test_child_folder_name_clashing_with_a_note_file_name_does_not_stop_the_export(tmp_path):
+    work, child = "cat-work2", "cat-notatxt"
+    categories = [(work, None, "Lavoro", "x"), (child, work, "Nota.txt", "x")]
+    notes = [
+        ("a", "Nota", None, b"testo", work, "1", 0, T0, T0),
+        ("b", "Sotto", None, b"testo2", child, "2", 0, T0 + 1, T0 + 1),
+    ]
+    _, out = _export(tmp_path, notes=notes, categories=categories, index=[], media={})
+    assert _files(out) == sorted([
+        "Lavoro/Nota (2).txt",
+        "Lavoro/Nota.txt/Sotto.txt",
+    ])
 
 
 def test_same_titles_in_one_folder_do_not_overwrite_each_other(tmp_path):

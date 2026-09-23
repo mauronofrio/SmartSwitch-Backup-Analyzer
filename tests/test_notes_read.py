@@ -84,6 +84,19 @@ def test_unsafe_file_path_stem_is_never_followed(tmp_path):
     assert notes["Nota"].attachments == []
 
 
+def test_invalid_utf8_in_a_title_does_not_stop_the_export(tmp_path):
+    scan_dir = build_notes_scan_dir(tmp_path / "scan")
+    con = sqlite3.connect(scan_dir.joinpath(*DB))
+    con.execute("UPDATE sdoc SET title = CAST(? AS TEXT) WHERE UUID = 'n-text'", (b"Nota \xff",))
+    con.commit()
+    con.close()
+
+    notes = read_notes(scan_dir)
+
+    assert len(notes) == 7
+    assert any("Nota �" in n.title for n in notes)
+
+
 def test_rows_only_in_the_wal_are_read_and_the_original_is_untouched(tmp_path):
     wal_note = ("n-wal", "Solo nel WAL", None, b"x", UNCAT, "1700000000009", 0, T0 + 20000, T0 + 21000)
     scan_dir = build_notes_scan_dir(tmp_path / "scan", wal_notes=[wal_note])

@@ -139,7 +139,9 @@ def _read(con: sqlite3.Connection, root: Path) -> list[Note]:
     folders = _folders(con)
     index: dict[str, str] = {}
     if "text_search" in tables:
-        for row in con.execute("SELECT sdocUUID, strippedContent FROM text_search"):
+        for row in con.execute(
+            "SELECT sdocUUID, strippedContent FROM text_search ORDER BY rowid"
+        ):
             text = _text(row["strippedContent"])
             if text.strip():
                 index.setdefault(row["sdocUUID"], text)
@@ -186,6 +188,7 @@ def read_notes(scan_dir: Path) -> list[Note]:
             con = sqlite3.connect(_copy_database(db, Path(tmp_name)))
             try:
                 con.row_factory = sqlite3.Row
+                con.text_factory = lambda raw: raw.decode("utf-8", errors="replace")
                 return _read(con, root)
             finally:
                 con.close()
@@ -275,10 +278,10 @@ def _txt_body(note: Note) -> str:
 
 
 def _set_mtime(path: Path, seconds: float | None) -> None:
-    if seconds:
+    if seconds and 0 < seconds < 253402300800:
         try:
             os.utime(path, (seconds, seconds))
-        except (OverflowError, ValueError):
+        except (OverflowError, ValueError, OSError):
             pass
 
 
@@ -289,6 +292,16 @@ def export_notes(scan_dir: Path, out_dir: Path) -> NotesExportResult:
 
     result = NotesExportResult()
     taken_by_folder: dict[tuple[str, ...], set[str]] = {}
+    # A note's folder path can share a name with another note's file (e.g. a
+    # category "Nota.txt" under "Lavoro" and a note "Nota" in "Lavoro"): claim
+    # every folder that will be created before planning any note's names, so
+    # the note that would collide gets renamed instead of crashing mkdir().
+    for note in notes:
+        parts = tuple(safe_name(part) for part in note.folder)
+        for i in range(1, len(parts) + 1):
+            parent = tuple(p.lower() for p in parts[: i - 1])
+            taken_by_folder.setdefault(parent, set()).add(parts[i - 1].lower())
+
     for note in notes:
         parts = tuple(safe_name(part) for part in note.folder)
         folder = out_dir.joinpath(*parts)
