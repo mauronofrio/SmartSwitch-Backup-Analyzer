@@ -397,8 +397,16 @@ def _check_no_overlap(scan_dir: Path, out_dir: Path, categories: list[str]) -> N
 
 def check_out_dir(scan_dir: Path, out_dir: Path) -> None:
     """Raise ``FilesExportError`` if merging into ``out_dir`` is not safe (checked
-    before anything is written, e.g. by ``export all``)."""
-    _check_no_overlap(scan_dir, out_dir, found_categories(scan_dir))
+    before anything is written, e.g. by ``export all``).
+
+    A scan without file categories (or with an unreadable report) is not an
+    overlap: nothing will be merged, and ``export_files`` reports that itself.
+    """
+    try:
+        categories = found_categories(scan_dir)
+    except FilesExportError:
+        return
+    _check_no_overlap(scan_dir, out_dir, categories)
 
 
 def _count_partials(out_dir: Path) -> int:

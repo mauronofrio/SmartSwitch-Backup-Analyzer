@@ -451,3 +451,15 @@ def test_export_all_checks_the_files_out_dir_before_writing_anything(tmp_path, c
     assert "==" not in captured.out
     assert not out.exists()
     assert (scan_dir / "Photo" / "DCIM" / "Camera" / "a.jpg").read_bytes() == b"photo-a"
+
+
+@pytest.mark.parametrize("files_mode", ["copy", "move"])
+def test_export_all_without_file_categories_still_runs_the_other_exports(tmp_path, capsys, files_mode):
+    scan_dir = build_apps_scan_dir(tmp_path / "scan")
+    out = tmp_path / "all"
+    assert run(["export", "all", str(scan_dir), "--out", str(out), "--files", files_mode]) == 0
+    captured = capsys.readouterr()
+    assert (out / "apps.html").is_file()
+    assert "== files ==" in captured.out
+    assert "error: no file categories found in the scan output" in captured.err
+    assert f"1 of 11 exports written to {out}" in captured.out

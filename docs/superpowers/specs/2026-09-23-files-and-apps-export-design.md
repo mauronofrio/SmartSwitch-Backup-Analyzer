@@ -218,7 +218,10 @@ src/ssba/cli/main.py             # export files --mode, export apps, export all 
   in `leftover_partials` — never deleted.
 - `check_out_dir(scan_dir, out_dir)`: public, runs `found_categories` and the
   overlap check above without placing anything (`FilesExportError` if
-  unsafe), for callers that must validate before writing anything else.
+  unsafe), for callers that must validate before writing anything else. When
+  `found_categories` fails (no file category, unreadable report) it returns
+  without error: nothing will be merged, so nothing can overlap, and
+  `export_files` reports the problem itself.
 - `FilesExportResult`: `placed`, `merged`, `already_present`, `conflicts`,
   `originals` (placed originals), `dated`, `missing`, `bad_manifests`,
   `leftover_partials`.
@@ -264,8 +267,9 @@ src/ssba/cli/main.py             # export files --mode, export apps, export all 
   `check_out_dir(scan_dir, <dir>/files)` runs first, before any exporter
   writes: on `FilesExportError` it prints `error: …` and exits 1 without
   running anything (so an `--out` inside a category folder never gets the
-  other exports written into the scan either; this includes a scan with no
-  file category at all).
+  other exports written into the scan either). A scan with no file category
+  is not stopped: every export runs, the `files` job prints its own
+  `error: …` and counts as not written.
 
 ## Testing
 

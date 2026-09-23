@@ -9,8 +9,15 @@ from pathlib import Path
 import pytest
 
 from ssba.core.parsers import files as files_module
-from ssba.core.parsers.files import FilesExportError, _new_partial_name, _place, export_files
+from ssba.core.parsers.files import (
+    FilesExportError,
+    _new_partial_name,
+    _place,
+    check_out_dir,
+    export_files,
+)
 from tests.files_fixtures import FILES, T, build_files_scan_dir
+from tests.scan_fixtures import add_category
 
 TREE = sorted([
     "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/w.jpg",
@@ -567,3 +574,16 @@ def test_a_failed_partial_cleanup_does_not_mask_the_original_error(tmp_path, mon
     monkeypatch.setattr(Path, "unlink", failing_unlink)
     with pytest.raises(FilesExportError, match="original failure"):
         export_files(scan_dir, out, "copy")
+
+
+def test_check_out_dir_accepts_a_scan_without_file_categories(tmp_path):
+    # Nothing will be merged, so nothing can overlap; export files reports the
+    # missing categories itself.
+    add_category(tmp_path, "APKFILE", [])
+    check_out_dir(tmp_path, tmp_path / "files")
+
+
+def test_check_out_dir_still_rejects_an_overlap(tmp_path):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    with pytest.raises(FilesExportError, match="must not be inside"):
+        check_out_dir(scan_dir, scan_dir / "Photo" / "files")
