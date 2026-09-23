@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 import shutil
+import stat
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -174,6 +176,20 @@ def _candidates(target: Path):
         n += 1
 
 
+def _same_path(a: Path, b: Path) -> bool:
+    """True only when ``a`` and ``b`` name the very same path (not just the same file)."""
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def _remove(path: Path) -> None:
+    """Delete ``path``, clearing a Windows read-only bit first if that is why it failed."""
+    try:
+        path.unlink()
+    except PermissionError:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        path.unlink()
+
+
 def _commit(source: Path, candidate: Path, mode: str) -> bool:
     """Create ``candidate`` from ``source`` without ever truncating or overwriting it.
 
@@ -190,17 +206,21 @@ def _commit(source: Path, candidate: Path, mode: str) -> bool:
         except OSError:
             pass  # cross-volume, or this filesystem has no hard links: fall back below
         else:
-            source.unlink()  # only after the link at ``candidate`` succeeded
+            _remove(source)  # only after the link at ``candidate`` succeeded
             return True
 
-    # Never write straight to ``candidate``: stage the bytes in a same-folder
-    # ".ssba-partial" file, then move them into place with a no-clobber ``os.link``
-    # (it fails instead of overwriting) followed by dropping the partial name. A
-    # stale partial from an earlier interrupted run is cleared before restaging.
-    partial = candidate.with_name(candidate.name + ".ssba-partial")
-    if partial.exists() or partial.is_symlink():
-        partial.unlink()
-    shutil.copyfile(source, partial)
+    # Never write straight to ``candidate``, and never delete an existing file to
+    # make room for staging: fill a uniquely-named, exclusively-created partial
+    # file, then commit it with a no-clobber ``os.link`` (it fails instead of
+    # overwriting) followed by dropping the partial name.
+    partial = candidate.with_name(f".{candidate.name}.{uuid.uuid4().hex}.ssba-partial")
+    try:
+        with source.open("rb") as src, partial.open("xb") as dst:
+            shutil.copyfileobj(src, dst)
+    except BaseException:
+        if partial.exists():
+            partial.unlink()
+        raise
     try:
         os.link(partial, candidate)
     except FileExistsError:
@@ -210,11 +230,20 @@ def _commit(source: Path, candidate: Path, mode: str) -> bool:
         if candidate.exists() or candidate.is_symlink():
             partial.unlink()
             return False  # taken concurrently, and this filesystem has no hard links
-        os.rename(partial, candidate)  # no hard-link support, but the name is free
+        try:
+            os.rename(partial, candidate)  # no hard-link support, but the name looked free
+        except FileExistsError:
+            # Windows raises here when the name was claimed in between; treat it like
+            # any other taken name. POSIX's os.rename instead silently replaces an
+            # existing file, so on a POSIX filesystem with no hard-link support a
+            # narrow race remains: a file created at this exact instant can still be
+            # overwritten. Hard links (the normal path above) do not have this gap.
+            partial.unlink()
+            return False  # the name was taken concurrently
     else:
         partial.unlink()
     if mode == "move":
-        source.unlink()  # only after the commit at ``candidate`` succeeded
+        _remove(source)  # only after the commit at ``candidate`` succeeded
     return True
 
 
@@ -230,13 +259,21 @@ def _place(source: Path, target: Path, mode: str, placed_now: set[Path]) -> tupl
             continue
         if candidate.exists():
             if os.path.samefile(source, candidate):
-                raise FilesExportError(
-                    "the output folder must not be inside or contain a scanned "
-                    f"category folder: {candidate} is {source}"
-                )
+                if _same_path(source, candidate):
+                    raise FilesExportError(
+                        "the output folder must not be inside or contain a scanned "
+                        f"category folder: {candidate} is {source}"
+                    )
+                # Same bytes, different names: a hard link a previous, interrupted
+                # move left behind (os.link succeeded, then removing the source
+                # failed or the process stopped). The data is already safe at
+                # ``candidate``; just finish cleaning up the source in move mode.
+                if mode == "move":
+                    _remove(source)
+                return "present", candidate
             if candidate.is_file() and _identical(source, candidate):
                 if mode == "move":
-                    source.unlink()  # only after proving the target holds the same bytes
+                    _remove(source)  # only after proving the target holds the same bytes
                 return ("merged" if candidate in placed_now else "present"), candidate
             conflict = True
             continue

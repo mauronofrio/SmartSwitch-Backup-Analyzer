@@ -124,9 +124,18 @@ src/ssba/cli/main.py             # export files --mode, export apps, export all 
   - a candidate name that is a symlink is never followed or trusted — it is
     always treated as occupied (the numbered-copy search moves on);
   - target exists and is the very same file as the source
-    (`os.path.samefile`, a defense-in-depth check for the overlap case
-    above even if it somehow wasn't caught up front) → `FilesExportError`;
-    nothing is deleted;
+    (`os.path.samefile`) — two cases, distinguished by comparing
+    `os.path.normcase(os.path.abspath(...))` of both paths:
+    - the paths are literally the same → `FilesExportError` (defense in
+      depth for the overlap case above, even if it somehow wasn't caught up
+      front); nothing is deleted;
+    - the paths differ → a hard link an earlier, interrupted `move` left
+      behind (its `os.link(source, candidate)` succeeded but removing the
+      source then failed — e.g. a read-only source — or the process
+      stopped). The bytes are already safe at the target: in `move` mode
+      the source is removed (counted in `already_present`, not treated as
+      the overlap error); in `copy` mode nothing changes (also
+      `already_present`);
   - target exists and is identical (same size and same SHA-256) → nothing is
     written; in `move` mode the source is deleted. Counted in `merged` when
     the target was placed earlier in this run (a backup duplicate), else in
@@ -138,23 +147,37 @@ src/ssba/cli/main.py             # export files --mode, export apps, export all 
     directly: `move` first tries a direct `os.link(source, candidate)`
     (falling back to the copy path below only across volumes or where hard
     links aren't supported); `copy`, and that fallback, stage the bytes in a
-    same-folder `<name>.ssba-partial` file (a stale one from an earlier
-    interrupted run is cleared first), then commit with a no-clobber
-    `os.link(partial, candidate)` followed by dropping the partial name (or
-    `os.rename` when the filesystem has no hard links). A name claimed by
-    someone else in between (`FileExistsError` from that `os.link`) is
-    treated like any other occupied candidate: the search moves to the next
-    numbered name.
+    uniquely-named, exclusively-created (`"xb"`) partial file in the same
+    folder — `.{name}.{uuid4().hex}.ssba-partial`, filled with
+    `shutil.copyfileobj`, so staging never deletes or reuses a real file a
+    person or another process left with a similar name — then commit with a
+    no-clobber `os.link(partial, candidate)` followed by dropping the
+    partial name (or `os.rename` when the filesystem has no hard links,
+    with a `FileExistsError` from that `os.rename` — how Windows reports a
+    concurrently-claimed name — handled the same way as from `os.link`;
+    without hard-link support a narrow race remains on POSIX, where
+    `os.rename` replaces a file created at that exact instant instead of
+    failing). A name claimed by someone else in between (`FileExistsError`
+    from `os.link` or that `os.rename`) is treated like any other occupied
+    candidate: the search moves to the next numbered name, and the partial
+    is removed.
   Existing files are never overwritten, and an interruption never leaves a
-  truncated file under a final name — at most a stray `.ssba-partial` file,
-  which the next run clears before restaging.
+  truncated file under a final name — at most a hidden, uniquely-named
+  `.ssba-partial` file, removed on a handled failure and otherwise inert
+  (never reused, since the next run picks a fresh name).
+- A source removal (after a hard link, after an identity match, after a
+  copy-fallback commit) uses a helper that clears a Windows read-only bit
+  and retries once if the plain delete raises `PermissionError`, so a
+  read-only source is still moved instead of failing.
 - After a file is placed, its modification time is set to its original date
   when known (`0 < t < 253402300800`; `OSError` ignored); counted in
   `dated`.
 - `move` mode, at the end: empty folders left inside each category folder
   are removed (bottom-up), the category folder itself included when empty.
 - A failure to read, copy or move → `FilesExportError("cannot <copy|move>
-  <source>: …")`; a re-run resumes (placed files are identical or gone).
+  <source>: …")`; a re-run resumes (placed files are identical or gone, or
+  are recognized as the same file under a different name — see the
+  `samefile` cases above).
 - `FilesExportResult`: `placed`, `merged`, `already_present`, `conflicts`,
   `originals` (placed originals), `dated`, `missing`, `bad_manifests`.
 
@@ -215,7 +238,12 @@ Fabricated category folders, manifests and files only.
   places it at the plain name; a name claimed by someone else between the
   existence check and the commit is not overwritten; a symlinked target is
   treated as occupied (skipped on platforms that cannot create symlinks
-  without privilege).
+  without privilege); a read-only source is still moved; a hard link left
+  by an interrupted move (`samefile` true, paths differ) resumes as
+  `already_present` in both modes rather than raising the overlap error; an
+  existing file that happens to be named like a partial is left untouched;
+  a `FileExistsError` from the no-hard-link `os.rename` fallback is treated
+  as a taken name, with no partial left behind.
 - Apps: sorting, fallbacks, skipped items, link escaping, page escaping,
   errors.
 - CLI: `files` each mode, `apps`, `export all` with default `none` and with
@@ -232,8 +260,13 @@ source, 16,231 dated; 129 apps.
 - `move` only ever deletes a source after it has been moved or proven
   identical to the file already at the target. Existing output files are never
   overwritten, and no write ever lands under a final name until it is
-  complete (staged in a same-folder `.ssba-partial` file, committed with a
-  no-clobber hard link). `out_dir` is checked up front against every
-  scanned category folder so a target can never resolve to its own source.
+  complete (staged in a uniquely-named, exclusively-created
+  `.{name}.{hex}.ssba-partial` file, committed with a no-clobber hard link —
+  never a fixed name, so staging never touches an unrelated file that
+  happens to look like a partial). `out_dir` is checked up front against
+  every scanned category folder so a target can never resolve to its own
+  source; `_place` also tells that real self-reference apart from a hard
+  link an interrupted move left behind (same file, different path), and a
+  source removal survives a Windows read-only source.
 - No real personal data in the repository, tests or fixtures.
 - No attribution lines in commits; nothing pushed; work on `master`.

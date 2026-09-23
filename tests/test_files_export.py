@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 from pathlib import Path
 
 import pytest
@@ -145,26 +146,26 @@ def test_same_size_but_different_content_is_kept_as_a_numbered_copy_in_move_mode
 
 
 def test_an_interrupted_copy_leaves_no_file_at_the_final_name(tmp_path, monkeypatch):
-    # shutil.copyfile takes a platform-specific fast path (e.g. Windows'
-    # _copyfileobj_readinto) that bypasses shutil.copyfileobj for non-empty
-    # files, so the interruption is simulated at the copyfile level itself.
+    # Staging fills a uniquely-named partial via shutil.copyfileobj on manually
+    # opened handles, so the interruption is simulated at that level.
     scan_dir = build_files_scan_dir(tmp_path / "scan")
     out = tmp_path / "out"
-    real_copyfile = shutil.copyfile
+    real_copyfileobj = shutil.copyfileobj
 
-    def flaky_copyfile(src, dst, *a, **kw):
-        if Path(dst).name.startswith("a.jpg"):
-            Path(dst).write_bytes(b"x")  # a truncated write, then the failure
+    def flaky_copyfileobj(fsrc, fdst, length=1024 * 1024):
+        if "a.jpg" in Path(fdst.name).name:
+            fdst.write(b"x")  # a truncated write, then the failure
             raise OSError("simulated interruption")
-        return real_copyfile(src, dst, *a, **kw)
+        return real_copyfileobj(fsrc, fdst, length)
 
-    monkeypatch.setattr(shutil, "copyfile", flaky_copyfile)
+    monkeypatch.setattr(shutil, "copyfileobj", flaky_copyfileobj)
     with pytest.raises(FilesExportError):
         export_files(scan_dir, out, "copy")
     assert not (out / "DCIM/Camera/a.jpg").exists()
     assert (scan_dir / "Photo/DCIM/Camera/a.jpg").exists()
+    assert not list(out.rglob("*ssba-partial*"))  # cleaned up after the failed fill
 
-    monkeypatch.setattr(shutil, "copyfile", real_copyfile)
+    monkeypatch.setattr(shutil, "copyfileobj", real_copyfileobj)
     export_files(scan_dir, out, "copy")
     assert (out / "DCIM/Camera/a.jpg").read_bytes() == b"photo-a"
     assert not (out / "DCIM/Camera/a (2).jpg").exists()
@@ -206,3 +207,79 @@ def test_a_symlinked_target_is_treated_as_occupied(tmp_path):
     assert (link_dir / "a.jpg").is_symlink()
     assert elsewhere.read_bytes() == b"elsewhere"  # the symlink's target was left alone
     assert (link_dir / "a (2).jpg").read_bytes() == b"photo-a"
+
+
+def test_a_read_only_source_is_still_moved(tmp_path):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+    src = scan_dir / "Photo/DCIM/Camera/a.jpg"
+    os.chmod(src, stat.S_IREAD)
+    try:
+        export_files(scan_dir, out, "move")
+    finally:
+        if src.exists():  # keep tmp_path cleanup from tripping over a read-only leftover
+            os.chmod(src, stat.S_IWRITE | stat.S_IREAD)
+    assert not src.exists()
+    assert (out / "DCIM/Camera/a.jpg").read_bytes() == b"photo-a"
+
+
+@pytest.mark.parametrize("mode", ["move", "copy"])
+def test_a_hard_link_left_by_an_interrupted_move_resumes_cleanly(tmp_path, mode):
+    # os.link(source, target) can succeed and then the source removal fail (or the
+    # process can stop) before a move finishes: source and target become two names
+    # for the same file. A later run must recognize this as already-placed, not as
+    # the output folder overlapping a category (samefile is true, but the paths
+    # differ from a real self-reference).
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+    src = scan_dir / "Photo/DCIM/Camera/a.jpg"
+    target = out / "DCIM/Camera/a.jpg"
+    target.parent.mkdir(parents=True)
+    os.link(src, target)
+
+    result = export_files(scan_dir, out, mode)
+    assert target.read_bytes() == b"photo-a"
+    assert result.already_present == 1
+    if mode == "move":
+        assert not src.exists()
+    else:
+        assert src.exists()
+
+
+def test_an_existing_partial_named_file_is_left_alone(tmp_path):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+    stray = out / "DCIM/Camera/a.jpg.ssba-partial"
+    stray.parent.mkdir(parents=True)
+    stray.write_bytes(b"do not touch")
+
+    export_files(scan_dir, out, "copy")
+    assert stray.read_bytes() == b"do not touch"
+    assert (out / "DCIM/Camera/a.jpg").read_bytes() == b"photo-a"
+
+
+def test_a_rename_collision_in_the_no_hard_link_fallback_tries_the_next_name(tmp_path, monkeypatch):
+    scan_dir = build_files_scan_dir(tmp_path / "scan")
+    out = tmp_path / "out"
+    real_link = os.link
+    real_rename = os.rename
+    fired = []
+
+    def no_hardlink_for_a_jpg(src, dst, *a, **kw):
+        if Path(dst).name in ("a.jpg", "a (2).jpg"):
+            raise OSError("no hard links")
+        return real_link(src, dst, *a, **kw)
+
+    def racy_rename(src, dst, *a, **kw):
+        if not fired and Path(dst).name == "a.jpg":
+            fired.append(True)
+            raise FileExistsError()
+        return real_rename(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "link", no_hardlink_for_a_jpg)
+    monkeypatch.setattr(os, "rename", racy_rename)
+    export_files(scan_dir, out, "copy")
+
+    assert not (out / "DCIM/Camera/a.jpg").exists()
+    assert (out / "DCIM/Camera/a (2).jpg").read_bytes() == b"photo-a"
+    assert not list(out.rglob("*ssba-partial*"))
