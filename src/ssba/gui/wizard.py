@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QWizard
 
 from ssba.core.discovery import BackupInfo
@@ -30,6 +30,8 @@ class WizardState:
     outcomes: list = field(default_factory=list)  # ssba.core.recovery.ExportOutcome
 
 
+ICON = Path(__file__).with_name("icon.ico")
+
 class RecoveryWizard(QWizard):
     def __init__(self, roots: list[Path] | None = None, parent=None) -> None:
         super().__init__(parent)
@@ -40,6 +42,7 @@ class RecoveryWizard(QWizard):
         self.state = WizardState()
         self.log_path: Path | None = None
         self.setWizardStyle(QWizard.ModernStyle)
+        self.setWindowIcon(QIcon(str(ICON)))
         self.setOption(QWizard.HaveCustomButton1, True)
         self.customButtonClicked.connect(self._on_custom_button)
         self.setPage(PAGE_BACKUP, BackupPage(self))

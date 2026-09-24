@@ -18,3 +18,9 @@ def test_entry_scripts_call_the_right_main(monkeypatch):
     monkeypatch.setattr("ssba.cli.main.main", lambda: called.append("cli"))
     runpy.run_path(str(ROOT / "packaging" / "ssba_cli.py"), run_name="__main__")
     assert called == ["cli"]
+
+
+def test_both_programs_get_the_icon():
+    spec = (ROOT / "packaging" / "ssba.spec").read_text(encoding="utf-8")
+    assert spec.count("icon=ICON") == 2
+    assert (ROOT / "src" / "ssba" / "gui" / "icon.svg").is_file()

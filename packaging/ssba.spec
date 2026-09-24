@@ -4,17 +4,18 @@ from pathlib import Path
 
 HERE = Path(SPECPATH)
 SRC = str(HERE.parent / "src")
+ICON = str(HERE.parent / "src" / "ssba" / "gui" / "icon.ico")
 
-gui = Analysis([str(HERE / "ssba_gui.py")], pathex=[SRC])
+gui = Analysis([str(HERE / "ssba_gui.py")], pathex=[SRC], datas=[(ICON, "ssba/gui")])
 cli = Analysis([str(HERE / "ssba_cli.py")], pathex=[SRC], excludes=["PySide6"])
 
 gui_exe = EXE(
     PYZ(gui.pure), gui.scripts, [],
-    exclude_binaries=True, name='SmartSwitch Backup Analyzer', console=False,
+    exclude_binaries=True, name='SmartSwitch Backup Analyzer', console=False, icon=ICON,
 )
 cli_exe = EXE(
     PYZ(cli.pure), cli.scripts, [],
-    exclude_binaries=True, name='ssba', console=True,
+    exclude_binaries=True, name='ssba', console=True, icon=ICON,
 )
 COLLECT(
     gui_exe, gui.binaries, gui.datas,
