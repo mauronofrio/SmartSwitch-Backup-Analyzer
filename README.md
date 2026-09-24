@@ -25,8 +25,16 @@ still have the backup folder Smart Switch created on your PC.
 3. By default the recovered data is saved next to the program, in a folder
    named after the phone model and backup date. You can pick any other folder.
 
-The wizard is in English and Italian. Nothing is sent anywhere: everything
-happens on your PC.
+The wizard is in English and Italian (button at the bottom). Nothing is sent
+anywhere: everything happens on your PC.
+
+| 1. Pick the backup | 2. Choose what to recover |
+|---|---|
+| ![Backup found on this PC and destination folder](docs/screenshots/1-backup.png) | ![Checkboxes for each kind of data and how to handle photos](docs/screenshots/3-choose.png) |
+| **3. Recovery in progress** | **4. Summary, with a button to open each result** |
+| ![Each kind of data recovered in turn](docs/screenshots/4-recover.png) | ![Counts for each kind of data](docs/screenshots/5-summary.png) |
+
+*Screenshots from a demo backup; the numbers are invented.*
 
 ## Command line
 

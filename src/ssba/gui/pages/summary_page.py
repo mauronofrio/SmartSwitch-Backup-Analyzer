@@ -26,6 +26,7 @@ class SummaryPage(QWizardPage):
         self.w = wizard
         self.rows: list[SummaryRow] = []
         self.grid = QGridLayout()
+        self.grid.setColumnStretch(2, 1)  # the result text takes the spare width
         self.open_results = QPushButton()
         self.guide = QPushButton()
         buttons = QHBoxLayout()
