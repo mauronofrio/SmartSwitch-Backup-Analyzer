@@ -13,8 +13,8 @@ Decisions taken with the project owner:
 
 - Audience: anyone, on **Windows**, as a downloadable `.exe` (no Python
   needed). Not published on PyPI.
-- Interface in **Italian and English** (system language by default,
-  switchable with a button).
+- Interface in **Italian and English** (English by default, switchable
+  with a button).
 - A **guided wizard** only; results are opened with the programs the user
   already has (File Explorer, browser). No in-app viewers.
 - Toolkit: **PySide6 (Qt)**.
@@ -150,8 +150,8 @@ codes are only inside `<details>` elements.
 
 - `app.py` — `main()`: `QApplication`, language, main window.
 - `i18n.py` — `tr(key, **fmt)` over two dictionaries (`it`, `en`) of every
-  visible string; language from `QLocale` (Italian if the system language is
-  Italian, else English), switchable with a language button in the wizard's
+  visible string; the wizard starts in English (owner's choice, 2026-09-24),
+  switchable with a language button in the wizard's
   button row ("Italiano" / "English"); switching re-applies texts to every
   page. A test checks both dictionaries have
   the same keys.

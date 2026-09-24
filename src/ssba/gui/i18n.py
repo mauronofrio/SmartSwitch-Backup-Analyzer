@@ -217,9 +217,5 @@ def language() -> str:
     return _current
 
 
-def system_language(locale_name: str) -> str:
-    return "it" if locale_name.lower().startswith("it") else "en"
-
-
 def tr(key: str, **fmt) -> str:
     return STRINGS[_current][key].format(**fmt)

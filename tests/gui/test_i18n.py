@@ -28,6 +28,16 @@ def test_unknown_language_falls_back_to_english():
     assert i18n.language() == "en"
 
 
-@pytest.mark.parametrize("name, lang", [("it_IT", "it"), ("it-CH", "it"), ("en_US", "en"), ("de_DE", "en")])
-def test_system_language(name, lang):
-    assert i18n.system_language(name) == lang
+def test_the_app_starts_in_english_even_on_an_italian_system(qtbot, monkeypatch):
+    from PySide6.QtCore import QLocale
+    from PySide6.QtWidgets import QApplication
+
+    from ssba.gui import app
+    from ssba.gui.wizard import RecoveryWizard
+
+    monkeypatch.setattr(QLocale, "system", staticmethod(lambda: QLocale("it_IT")))
+    monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+    monkeypatch.setattr(RecoveryWizard, "show", lambda self: None)
+    i18n.set_language("it")
+    assert app.main() == 0
+    assert i18n.language() == "en"
