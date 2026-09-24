@@ -183,6 +183,63 @@ def test_default_destination_falls_back_to_home_documents_when_qt_reports_none(m
     assert dest.parent.parent == tmp_path / "Documents"
 
 
+def _frozen_at(monkeypatch, folder):
+    import sys
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(folder / "SmartSwitch Backup Analyzer.exe"))
+
+
+def _info(tmp_path):
+    from datetime import datetime
+
+    from ssba.core.discovery import BackupInfo
+
+    return BackupInfo(path=tmp_path / "backup", device_name="Telefono", model="SM-X",
+                      saved_at=datetime(2026, 9, 22, 11, 58), size=1)
+
+
+def test_the_exe_saves_next_to_itself_by_default(monkeypatch, tmp_path):
+    import tempfile
+
+    from ssba.gui.pages.backup_page import default_destination
+
+    program = tmp_path / "SmartSwitch-Backup-Analyzer"
+    program.mkdir()
+    # pytest's tmp_path lives in the real temp folder; point "temp" elsewhere.
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path / "Temp"))
+    _frozen_at(monkeypatch, program)
+    dest = default_destination(_info(tmp_path), documents=tmp_path / "Documents")
+    assert dest == program / "SM-X_2026-09-22"
+
+
+def test_an_exe_run_from_inside_an_unextracted_zip_saves_to_documents(monkeypatch, tmp_path):
+    import tempfile
+
+    from ssba.gui.pages.backup_page import default_destination
+
+    temp = tmp_path / "Temp"
+    program = temp / "Temp1_SmartSwitch.zip" / "SmartSwitch-Backup-Analyzer"
+    program.mkdir(parents=True)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temp))
+    _frozen_at(monkeypatch, program)
+    dest = default_destination(_info(tmp_path), documents=tmp_path / "Documents")
+    assert dest == tmp_path / "Documents" / "SmartSwitch Recovery" / "SM-X_2026-09-22"
+
+
+def test_an_exe_in_a_read_only_folder_saves_to_documents(monkeypatch, tmp_path):
+    from ssba.gui.pages import backup_page
+
+    import tempfile
+
+    program = tmp_path / "Program Files" / "SSBA"
+    program.mkdir(parents=True)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path / "Temp"))
+    _frozen_at(monkeypatch, program)
+    monkeypatch.setattr(backup_page, "_writable", lambda folder: False)
+    dest = backup_page.default_destination(_info(tmp_path), documents=tmp_path / "Documents")
+    assert dest.parent.parent == tmp_path / "Documents"
+
 def test_worker_uses_the_backup_path_captured_when_the_page_starts(wizard, qtbot, tmp_path):
     page = wizard.page(PAGE_BACKUP)
     page.dest.setText(str(tmp_path / "out"))

@@ -167,7 +167,9 @@ Pages:
    **Browse…** for another backup folder (validated with `read_backup`) or
    an existing scan folder (one with `report.json`: the decryption page is
    skipped). **Save to:** folder field + **Browse…**, default
-   `Documents\SmartSwitch Recovery\<model>_<YYYY-MM-DD>`. Checks before
+   `<folder of the .exe>\<model>_<YYYY-MM-DD>`; when run as a script, from
+   inside a zip that was not extracted (a temporary folder) or from a folder
+   the user cannot write to, `Documents\SmartSwitch Recovery\<model>_<YYYY-MM-DD>`. Checks before
    **Next**:
    - the destination is not inside the backup folder;
    - free space (`shutil.disk_usage`) ≥ 2 × backup size (low-space dialog:

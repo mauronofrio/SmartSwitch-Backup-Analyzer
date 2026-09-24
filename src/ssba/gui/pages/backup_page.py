@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import shutil
+import sys
+import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths
@@ -26,12 +28,39 @@ def free_space(path: Path) -> int | None:
         return None
 
 
+def _writable(folder: Path) -> bool:
+    try:
+        with tempfile.TemporaryFile(dir=folder):
+            return True
+    except OSError:
+        return False
+
+
+def _program_folder() -> Path | None:
+    """The folder of the running .exe, if recovered data can safely be saved there.
+
+    Not when run as a script, not from inside a zip opened without extracting it
+    (Windows runs it from a temporary folder that is emptied later), and not from
+    a folder the user cannot write to (such as Program Files).
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    folder = Path(sys.executable).resolve().parent
+    if folder.is_relative_to(Path(tempfile.gettempdir()).resolve()):
+        return None
+    return folder if _writable(folder) else None
+
+
 def default_destination(info: BackupInfo, documents: Path | None = None) -> Path:
+    day = info.saved_at.strftime("%Y-%m-%d") if info.saved_at else "backup"
+    name = f"{info.model}_{day}"
+    program = _program_folder()
+    if program is not None:
+        return program / name
     if documents is None:
         location = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
         documents = Path(location) if location else Path.home() / "Documents"
-    day = info.saved_at.strftime("%Y-%m-%d") if info.saved_at else "backup"
-    return documents / "SmartSwitch Recovery" / f"{info.model}_{day}"
+    return documents / "SmartSwitch Recovery" / name
 
 
 def _inside(path: Path, folder: Path) -> bool:
