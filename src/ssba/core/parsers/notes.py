@@ -153,15 +153,15 @@ def _read(con: sqlite3.Connection, root: Path) -> list[Note]:
         " createdAt, lastModifiedAt FROM sdoc ORDER BY createdAt, _id"
     ):
         created = _seconds(row["createdAt"])
-        title = " ".join(_text(row["title"]).split()) or " ".join(_text(row["displayTitle"]).split())
-        if not title:
-            day = format_time(created)[:10]
-            title = f"Untitled {day}" if day else "Untitled note"
         if row["UUID"] in index:
             text, source = index[row["UUID"]], "index"
         else:
             preview = _text(row["content"])
             text, source = (preview, "preview") if preview.strip() else (None, None)
+        title = _one_line(row["title"]) or _one_line(row["displayTitle"]) or _first_line(text)
+        if not title:
+            day = format_time(created)[:10]
+            title = f"Untitled {day}" if day else "Untitled note"
         note_folder = _note_folder(root, row["filePath"])
         attachments, drawings = _media(note_folder) if note_folder else ([], False)
         deleted = _is_set(row["isDeleted"])
@@ -181,6 +181,28 @@ def _read(con: sqlite3.Connection, root: Path) -> list[Note]:
     return notes
 
 
+_TITLE_LENGTH = 50
+
+
+def _one_line(value) -> str:
+    """``value`` as one line, without the control bytes Samsung Notes uses as a
+    placeholder title (b"\\x01\\x00...") for notes the user never named."""
+    text = "".join(ch for ch in _text(value) if ch.isprintable() or ch.isspace())
+    return " ".join(text.split())
+
+
+def _first_line(text: str | None) -> str:
+    """The first non-empty line of a note, cut at a word, as the phone shows it."""
+    for line in (text or "").splitlines():
+        title = _one_line(line)
+        if title:
+            if len(title) > _TITLE_LENGTH:
+                cut = title[:_TITLE_LENGTH].rsplit(" ", 1)[0] or title[:_TITLE_LENGTH]
+                title = cut.rstrip(" ,.;:") + "\u2026"
+            return title
+    return ""
+
+
 def read_notes(scan_dir: Path) -> list[Note]:
     db = _find_database(scan_dir)
     root = db.parent.parent
@@ -197,7 +219,12 @@ def read_notes(scan_dir: Path) -> list[Note]:
         raise NotesExportError(f"cannot read {db}: {exc}") from exc
 
 
-_UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+# Characters Windows refuses in names, replaced by the closest readable choice.
+_NAME_REPLACEMENTS = str.maketrans({
+    **{c: None for c in "*?<>"},
+    **{chr(c): None for c in range(32)},
+    ":": " - ", "/": "-", "\\": "-", "|": "-", '"': "'",
+})
 _MAX_NAME = 100
 _RESERVED = {
     "CON", "PRN", "AUX", "NUL",
@@ -225,7 +252,7 @@ class NotesExportResult:
 
 def safe_name(text: str) -> str:
     """A file or folder name every common file system (Windows included) accepts."""
-    name = _UNSAFE_CHARS.sub("_", text).strip().rstrip(". ")
+    name = " ".join(text.translate(_NAME_REPLACEMENTS).split()).strip(" -").rstrip(". ")
     name = name[:_MAX_NAME].rstrip(". ")
     if not name:
         return "Untitled"

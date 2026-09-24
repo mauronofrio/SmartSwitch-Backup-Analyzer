@@ -47,7 +47,7 @@ def test_parent_cycle_and_empty_folder_name_do_not_hang(tmp_path):
 
 
 def test_untitled_note_fallback_when_title_and_created_at_are_both_missing(tmp_path):
-    note = ("n", "", None, b"x", UNCAT, "1", 0, None, T0)
+    note = ("n", "", None, None, UNCAT, "1", 0, None, T0)
     notes = _read(tmp_path, notes=[note], index=[], media={})
     assert "Untitled note" in notes
 
@@ -145,3 +145,25 @@ def test_missing_category_raises(tmp_path):
     add_category(tmp_path, "CONTACT", [])
     with pytest.raises(NotesExportError, match="SAMSUNGNOTE"):
         read_notes(tmp_path)
+
+
+def test_placeholder_title_falls_back_to_the_first_line_of_text(tmp_path):
+    # Samsung Notes stores b"\x01\x00..." as the title of notes the user never named.
+    note = ("n", "\x01" + "\x00" * 11, None, b"  Coca.      Rinascita ,\n punto di.", UNCAT, "1", 0, T0, T0)
+    notes = read_notes(build_notes_scan_dir(tmp_path / "scan", notes=[note], index=[], media={}))
+    assert [n.title for n in notes] == ["Coca. Rinascita ,"]
+
+
+def test_long_first_line_is_cut_at_a_word(tmp_path):
+    text = ("parola " * 20).encode()
+    note = ("n", "", None, text, UNCAT, "1", 0, T0, T0)
+    notes = read_notes(build_notes_scan_dir(tmp_path / "scan", notes=[note], index=[], media={}))
+    title = notes[0].title
+    assert title.endswith("parola\u2026")
+    assert len(title) <= 51
+
+
+def test_placeholder_title_without_text_is_untitled_with_its_date(tmp_path):
+    note = ("n", "\x01\x00\x00", b"\x00\x00", None, UNCAT, "1", 0, T0, T0)
+    notes = read_notes(build_notes_scan_dir(tmp_path / "scan", notes=[note], index=[], media={}))
+    assert notes[0].title == f"Untitled {format_time(T0 / 1000)[:10]}"

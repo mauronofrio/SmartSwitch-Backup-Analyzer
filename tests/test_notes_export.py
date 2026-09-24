@@ -132,11 +132,14 @@ def test_line_breaks_are_normalized(tmp_path):
 
 
 @pytest.mark.parametrize("raw, safe", [
-    ('a<b>c:d"e/f\\g|h?i*j', "a_b_c_d_e_f_g_h_i_j"),
+    ('a<b>c:d"e/f\\g|h?i*j', "abc - d'e-f-g-hij"),
+    ("**Metodo scout: Lupetti**", "Metodo scout - Lupetti"),
+    ('"Per chi sto diventando?"', "'Per chi sto diventando'"),
+    ("***", "Untitled"),
     ("  Nota.  ", "Nota"),
     ("", "Untitled"),
     ("...", "Untitled"),
-    ("a\x01b", "a_b"),
+    ("a\x01b", "ab"),
     ("CON", "_CON"),
     ("con.txt", "_con.txt"),
     ("Lpt9", "_Lpt9"),
@@ -150,7 +153,7 @@ def test_unsafe_titles_and_folders_are_made_safe(tmp_path):
     categories = [(UNCAT, None, "Uncategorized", "uncategorized:///"), ("w", UNCAT, "A/B", "x")]
     notes = [("a", "Q: 1/2?", None, b"x", "w", "1", 0, T0, T0)]
     _, out = _export(tmp_path, notes=notes, categories=categories, index=[], media={})
-    assert _files(out) == ["A_B/Q_ 1_2_.txt"]
+    assert _files(out) == ["A-B/Q - 1-2.txt"]
 
 
 def test_no_notes_raises(tmp_path):
