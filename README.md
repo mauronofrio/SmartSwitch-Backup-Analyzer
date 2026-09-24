@@ -1,72 +1,68 @@
 # SmartSwitch Backup Analyzer
 
-Recover data from a Samsung Smart Switch PC backup — even from a phone you
-can no longer use (broken screen, dead device, etc.) — as long as you still
-have the backup folder Smart Switch created on your PC.
+Recover your data from a Samsung Smart Switch PC backup — even from a phone
+you can no longer use (broken screen, dead device, etc.) — as long as you
+still have the backup folder Smart Switch created on your PC.
 
-## What this does (today)
+## What you get back
 
-Smart Switch "basic" (no backup password) backups encrypt most of their
-content with a per-backup key that isn't published, but *is* fully
-recoverable from data already inside the backup. This tool:
+| Data | Recovered as |
+|---|---|
+| Contacts | `contacts.vcf` — import into Google Contacts, iCloud, Outlook or any phone |
+| SMS and call log | `sms.xml`, `calls.xml` — restore on Android with *SMS Backup & Restore* |
+| Samsung Notes | one `.txt` per note, attachments (PDF, images...) side by side, folders as on the phone, deleted notes in `Trash/` |
+| Photos, videos, documents, music | the phone's folder tree (`DCIM/Camera`, `Download`...) with original dates, or left in their backup folders |
+| Wi-Fi networks | `wifi.html` — QR codes to connect a new phone, passwords shown only on click |
+| Browser, clipboard, clock | Samsung Internet bookmarks and history, keyboard clipboard (texts and images), alarms, timers and world clock |
+| Blocked numbers, installed apps | `blocked-numbers.txt`, `apps.html` with Play Store links |
 
-1. Recovers that per-backup key from `backupHistoryInfo.xml`.
-2. Walks every category folder in the backup (Notes, Contacts, Call log,
-   ...) and decrypts every encrypted file it finds, whatever the category —
-   without needing to understand what the data means.
-3. Writes everything it could decrypt (or that was already plaintext) to an
-   output folder you choose, plus a `report.json` summarizing what was
-   recovered per category.
+## Windows: download and run
 
-Turning that raw decrypted data into something readable per category (e.g.
-notes as browsable HTML, contacts as a `.vcf` you can import) is a separate,
-ongoing effort — see "Status" below.
+1. Download `SmartSwitch-Backup-Analyzer-<version>-windows.zip` from
+   [Releases](../../releases) and **extract it** (right click → *Extract all*).
+2. Open `SmartSwitch Backup Analyzer.exe`. It finds your Smart Switch backups
+   by itself, decrypts the one you pick and lets you choose what to recover.
+3. By default the recovered data is saved next to the program, in a folder
+   named after the phone model and backup date. You can pick any other folder.
 
-## Status
+The wizard is in English and Italian. Nothing is sent anywhere: everything
+happens on your PC.
 
-- Generic decryption engine (this repo, Phase 1): done
-- Per-category readable exports (Notes, Contacts, Call log planned next): not started
-- Graphical interface (planned once the above are in place): not started
+## Command line
 
-## Install
-
-Requires Python 3.10+.
-
-```bash
-pip install -e .
-```
-
-## Usage
+The same folder also contains `ssba.exe`; from source, `pip install -e .`
+(Python 3.10+) gives the `ssba` command.
 
 ```bash
-ssba scan "C:\Users\<you>\Samsung\SmartSwitch\backup\<device>\<backup_folder>" --out ./recovered
+ssba backups                                   # list the backups on this PC
+ssba scan "<backup folder>" --out ./recovered  # decrypt every category
+ssba export all ./recovered --out ./export     # every readable export
+ssba export all ./recovered --out ./export --files copy   # also merge photos and files
 ```
 
-This writes decrypted category data under `./recovered/<CATEGORY>/...` and a
-`./recovered/report.json` summary.
+Single exports: `ssba export contacts|messages|calls|wifi|blocked-numbers|browser|clipboard|clock|notes|apps|files`
+— see `ssba export <kind> --help`. The engine is importable too
+(`ssba.core`), so every step can be scripted without the interface.
 
-Then turn the recovered contacts into one file you can import on any phone or
-contacts service (Google Contacts, iCloud, Outlook, another Android phone):
+The graphical interface from source: `pip install -e ".[gui]"`, then `ssba-gui`.
+To build the Windows package: `.\packaging\build.ps1` (see `packaging/README.md`).
 
-```bash
-ssba export contacts ./recovered --out contacts.vcf
-```
+**Only "basic" Smart Switch backups (no backup password) are supported.**
+Password/PIN-protected backups are not supported yet.
 
-It merges every account's contacts found in the backup — including contacts
-that were stored only on the phone and never synced anywhere — plus your own
-profile card, as vCard 3.0. Any card that can't be read is kept unchanged in
-`contacts_unparsed.vcf` instead of being dropped.
+## How it works
 
-**This tool only supports "basic" (no backup password) Smart Switch
-backups.** Password/PIN-protected backups are not supported yet.
+Smart Switch encrypts most of a basic backup with a per-backup key that is
+not published but can be recovered from `backupHistoryInfo.xml` inside the
+backup. The tool derives that key, decrypts every category, then turns each
+one into standard formats you can open or import elsewhere.
 
 ## Your data, your responsibility
 
-The whole point of this tool is to recover *your own personal data*. Never
-commit a real backup, or anything this tool recovers from one, to a public
-Git repository. `.gitignore` in this repo already excludes the conventional
-`backups/`, `out/`, and `output/` folders — keep your own data outside the
-repo entirely if you can.
+This tool exists to recover *your own personal data*. Never commit a real
+backup, or anything recovered from one, to a public Git repository. The
+recovered `wifi.html` contains your Wi-Fi passwords: keep it private.
+`.gitignore` already excludes `backups/`, `out/` and `output/`.
 
 ## License
 

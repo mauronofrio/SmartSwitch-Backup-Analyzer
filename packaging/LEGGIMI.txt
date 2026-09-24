@@ -1,0 +1,40 @@
+SmartSwitch Backup Analyzer
+===========================
+
+ITALIANO
+
+Recupera i dati da un backup di Samsung Smart Switch fatto sul PC, anche se
+il telefono non funziona piu'.
+
+1. Estrai tutto lo zip in una cartella (tasto destro > "Estrai tutto").
+   Non avviare il programma da dentro lo zip.
+2. Apri "SmartSwitch Backup Analyzer.exe" e segui la procedura guidata:
+   trova da solo i backup di Smart Switch su questo PC.
+3. I dati recuperati vengono salvati di default accanto al programma, in una
+   cartella con il modello del telefono e la data del backup.
+
+Attenzione: wifi.html contiene le password del Wi-Fi, tienilo per te.
+Sono supportati solo i backup senza password di Smart Switch.
+Tutto avviene sul tuo PC: nessun dato viene inviato.
+
+ssba.exe e' la versione a riga di comando (ssba --help).
+
+ENGLISH
+
+Recovers your data from a Samsung Smart Switch PC backup, even if the phone
+no longer works.
+
+1. Extract the whole zip to a folder (right click > "Extract all").
+   Do not run the program from inside the zip.
+2. Open "SmartSwitch Backup Analyzer.exe" and follow the wizard: it finds
+   the Smart Switch backups on this PC by itself.
+3. By default the recovered data is saved next to the program, in a folder
+   named after the phone model and the backup date.
+
+Note: wifi.html contains your Wi-Fi passwords, keep it private.
+Only Smart Switch backups without a backup password are supported.
+Everything happens on your PC: no data is sent anywhere.
+
+ssba.exe is the command-line version (ssba --help).
+
+License: AGPL-3.0 (see LICENSE.txt).

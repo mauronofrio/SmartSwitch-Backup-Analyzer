@@ -24,3 +24,10 @@ def test_both_programs_get_the_icon():
     spec = (ROOT / "packaging" / "ssba.spec").read_text(encoding="utf-8")
     assert spec.count("icon=ICON") == 2
     assert (ROOT / "src" / "ssba" / "gui" / "icon.svg").is_file()
+
+
+def test_the_zip_gets_the_license_and_a_readme():
+    script = (ROOT / "packaging" / "build.ps1").read_text(encoding="utf-8")
+    assert "LICENSE.txt" in script
+    assert "LEGGIMI" in script
+    assert (ROOT / "packaging" / "LEGGIMI.txt").is_file()

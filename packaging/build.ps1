@@ -14,6 +14,9 @@ if ($LASTEXITCODE -ne 0) { throw "pip install .[gui,build] failed" }
 if ($LASTEXITCODE -ne 0) { throw "pyinstaller failed" }
 $version = (& "$venv\Scripts\python.exe" -c "import importlib.metadata as m; print(m.version('smartswitch-backup-analyzer'))").Trim()
 if ($LASTEXITCODE -ne 0) { throw "version query failed" }
+$app = Join-Path $root "dist\SmartSwitch-Backup-Analyzer"
+Copy-Item (Join-Path $root "LICENSE") (Join-Path $app "LICENSE.txt")
+Copy-Item (Join-Path $root "packaging\LEGGIMI.txt") (Join-Path $app "LEGGIMI - README.txt")
 $zip = Join-Path $root "dist\SmartSwitch-Backup-Analyzer-$version-windows.zip"
 if (Test-Path $zip) { Remove-Item $zip }
 Compress-Archive -Path (Join-Path $root "dist\SmartSwitch-Backup-Analyzer\*") -DestinationPath $zip
