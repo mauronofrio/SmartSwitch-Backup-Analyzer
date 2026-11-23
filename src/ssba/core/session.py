@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from xml.etree import ElementTree as ET
+import zipfile
 
-from ssba.core.crypto import decrypt_dummy_ecb
+from ssba.core.crypto import decrypt_dummy_ecb, decrypt_ssm_dummy_exml
 from ssba.core.errors import UnsupportedBackupError
 
 
@@ -48,6 +49,29 @@ def get_session_dummy(backup_root: Path) -> str:
     try:
         return decrypt_dummy_ecb(ciphertext_hex)
     except ValueError as exc:
+        try:
+            ssm_dummy = _fallback_ssm_dummy(backup_root)
+        except ValueError:
+            ssm_dummy = None
+        if ssm_dummy is not None:
+            return ssm_dummy
         raise UnsupportedBackupError(
             f"could not decrypt the session Dummy value: {exc}"
         ) from exc
+
+
+
+def _fallback_ssm_dummy(backup_root: Path) -> str | None:
+    """Look for SSMDummyValue.exml inside SAMSUNGNOTE/*.SNMM (used in One UI 7 /
+    Android 15+ backups where backupHistoryInfo.xml <Dummy> is not ECB-encrypted).
+    """
+    snote_dir = backup_root / "SAMSUNGNOTE"
+    if not snote_dir.is_dir():
+        return None
+    for candidate in snote_dir.iterdir():
+        if candidate.suffix.lower() == ".snmm" and zipfile.is_zipfile(candidate):
+            with zipfile.ZipFile(candidate, "r") as zf:
+                for member in zf.namelist():
+                    if Path(member).name.lower() == "ssmdummyvalue.exml":
+                        return decrypt_ssm_dummy_exml(zf.read(member))
+    return None

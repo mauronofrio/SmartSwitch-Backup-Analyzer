@@ -4,9 +4,12 @@ import os
 
 import pytest
 
+import zipfile
+
 from ssba.core.errors import UnsupportedBackupError
 from ssba.core.session import get_session_dummy
-from tests.crypto_helpers import encrypt_dummy_ecb
+from tests.crypto_helpers import encrypt_dummy_ecb, encrypt_ssm_dummy_exml
+
 
 FAKE_DUMMY = "AABBCCDDEEFF00112233445566778899AABB"
 
@@ -71,3 +74,14 @@ def test_get_session_dummy_permission_error(tmp_path):
     finally:
         # Restore permissions so cleanup doesn't fail
         os.chmod(file_path, 0o644)
+
+
+def test_get_session_dummy_falls_back_to_ssm_dummy_exml(tmp_path):
+    # Non-ECB <Dummy> (e.g., Android 15 / One UI 7+ backupHistoryInfo.xml)
+    _write_history_xml(tmp_path, "AA" * 48)
+    snote_dir = tmp_path / "SAMSUNGNOTE"
+    snote_dir.mkdir()
+    with zipfile.ZipFile(snote_dir / "SamsungNote.SNMM", "w") as zf:
+        zf.writestr("SSMDummyValue.exml", encrypt_ssm_dummy_exml(FAKE_DUMMY))
+
+    assert get_session_dummy(tmp_path) == FAKE_DUMMY

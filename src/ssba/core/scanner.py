@@ -62,6 +62,7 @@ _MIMETYPE_PEEK_LIMIT = 256
 # it under as a stand-in "known container" filename. No functional
 # difference for real backups either way.
 KNOWN_SMART_SWITCH_CONTAINERS = frozenset({
+    "SamsungNote.SNMM",# SAMSUNGNOTE: outer wrapper in modern Smart Switch builds
     "sdoc.snmm",       # SAMSUNGNOTE: outer wrapper, contains sdoc.bk and small metadata files
     "sdoc.bk",         # SAMSUNGNOTE: the actual encrypted note database + note packages
     "Contact.spbm",    # CONTACT: outer wrapper, contains Contact.bk

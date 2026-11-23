@@ -6,7 +6,11 @@ import hashlib
 
 from Crypto.Cipher import AES
 
+from xml.etree import ElementTree as ET
+
 FIXED_DUMMY_ECB_KEY: bytes = b"0b1e96db05d64ea4"
+BNR_SECURITY_KEY: bytes = b"epovviwlx,dirwq;sor0-fvksz,erwog"
+BNR_CHAIN_IV: bytes = b"afie,crywlxoetka"
 
 
 def derive_key(session_dummy: str) -> bytes:
@@ -68,3 +72,25 @@ def decrypt_dummy_ecb(ciphertext_hex: str) -> str:
     if any(c not in "0123456789abcdefABCDEF" for c in text):
         raise ValueError("decrypted Dummy is not hexadecimal")
     return text
+
+
+def decrypt_ssm_dummy_exml(raw: bytes) -> str:
+    """Decrypt SSMDummyValue.exml (AES-256-CBC, PKCS#7 padded) from an .SNMM
+    archive and return the <SSM_DummyValue> session hex string.
+    """
+    if not raw or len(raw) % 16 != 0:
+        raise ValueError("SSMDummyValue.exml is not a valid AES block multiple")
+    cipher = AES.new(BNR_SECURITY_KEY, AES.MODE_CBC, BNR_CHAIN_IV)
+    plaintext = cipher.decrypt(raw)
+    pad_len = plaintext[-1]
+    if 1 <= pad_len <= 16 and plaintext.endswith(bytes([pad_len]) * pad_len):
+        plaintext = plaintext[:-pad_len]
+    try:
+        xml_text = plaintext.decode("utf-8")
+        root = ET.fromstring(xml_text)
+    except (UnicodeDecodeError, ET.ParseError) as exc:
+        raise ValueError("decrypted SSMDummyValue.exml is not valid XML") from exc
+    value = (root.text or "").strip()
+    if not value or any(c not in "0123456789abcdefABCDEF" for c in value):
+        raise ValueError("missing or non-hex <SSM_DummyValue> in SSMDummyValue.exml")
+    return value
