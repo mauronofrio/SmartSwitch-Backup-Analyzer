@@ -4,12 +4,19 @@ import hashlib
 
 import pytest
 
-from ssba.core.crypto import decrypt_dummy_ecb, decrypt_iv_prefixed, derive_key
+from ssba.core.crypto import (
+    decrypt_dummy_ecb,
+    decrypt_iv_prefixed,
+    decrypt_ssm_dummy_exml,
+    derive_key,
+)
 from tests.crypto_helpers import (
     encrypt_dummy_ecb,
     encrypt_iv_prefixed,
     encrypt_iv_prefixed_pkcs7,
+    encrypt_ssm_dummy_exml,
 )
+
 
 FAKE_DUMMY = "AABBCCDDEEFF00112233445566778899AABB"
 
@@ -75,3 +82,13 @@ def test_decrypt_dummy_ecb_rejects_bad_hex():
 def test_decrypt_dummy_ecb_rejects_wrong_block_size():
     with pytest.raises(ValueError):
         decrypt_dummy_ecb("aabbcc")
+
+
+def test_decrypt_ssm_dummy_exml_round_trip():
+    raw = encrypt_ssm_dummy_exml(FAKE_DUMMY)
+    assert decrypt_ssm_dummy_exml(raw) == FAKE_DUMMY
+
+
+def test_decrypt_ssm_dummy_exml_rejects_wrong_block_size():
+    with pytest.raises(ValueError):
+        decrypt_ssm_dummy_exml(b"short")
